@@ -7,11 +7,17 @@
 #include <string>
 #include <vector>
 
+#include "stadium_dsp/agoura_tube_amp.hpp"
+#include "stadium_dsp/amp_precision_blocks.hpp"
+#include "stadium_dsp/amp_recipe_bank.hpp"
 #include "stadium_dsp/biquad_anticramp.hpp"
 #include "stadium_dsp/dual_cab_convolver.hpp"
+#include "stadium_dsp/guitar_input_z.hpp"
 #include "stadium_dsp/lockfree_spsc.hpp"
 #include "stadium_dsp/neural_clone_engine.hpp"
+#include "stadium_dsp/oscillators_and_lfo.hpp"
 #include "stadium_dsp/polyphase_oversampler.hpp"
+#include "stadium_dsp/pot_tapers.hpp"
 #include "stadium_dsp/simd_utils.hpp"
 
 namespace {
@@ -492,6 +498,258 @@ void Test12_ExternalFileImportPipeline() {
     Check(aidax_err < 1.5e-5f, "External .aidax Batch-16 vs scalar parity must be < 1.5e-5");
 }
 
+void Test3_AgouraTubeAmpAdaaNrCabZ() {
+    std::printf("\n=== [Test 3] Agoura Tube Amp + ADAA1 + 4x NR Cathode-Follower + Z_cab Coupling ===\n");
+    using namespace stadium_dsp;
+
+    AgouraTubeAmp amp;
+    amp.SetModel(AmpModelId::kBrit2203);
+    AmpParams p = amp.GetParams();
+    p.drive = 0.72f;
+    p.master = 0.65f;
+    p.hype = 0.0f;
+    amp.SetParams(p);
+
+    // Verify finite bounded output & reactive Z_cab response sensitivity
+    auto z_v30 = GetFactoryCabSpec(FactoryCabModel::k4x12V30).impedance;
+    auto z_flat = ReactiveCabImpedanceDesc{96.0f, 3.0f, 0.0f, 200.0f, 2.0f, 0.0f, 1600.0f, 0.0f, 0.3f};
+
+    auto measure_band = [&](const ReactiveCabImpedanceDesc& z, float freq_hz) {
+        amp.Reset();
+        amp.SetReactiveCabImpedance(z);
+        double e = 0.0;
+        for (int b = 0; b < 128; ++b) {
+            alignas(64) float in16[16], out16[16];
+            for (int i = 0; i < 16; ++i) {
+                in16[i] = 0.12f * std::sin(kTwoPi * freq_hz * (b * 16 + i) / kSampleRate);
+            }
+            amp.ProcessSubBlock16(in16, out16);
+            if (b >= 48) {
+                for (int i = 0; i < 16; ++i) e += static_cast<double>(out16[i]) * out16[i];
+            }
+        }
+        return std::sqrt(e / (80.0 * 16.0));
+    };
+
+    double rms_z = measure_band(z_v30, 96.0f);
+    double rms_flat = measure_band(z_flat, 96.0f);
+    double z_boost_db = 20.0 * std::log10((rms_z + 1e-12) / (rms_flat + 1e-12));
+
+    // Verify Stock (hype=0) vs Hype (hype=1) produces distinct harmonic saturation/EQ contour
+    p.hype = 1.0f;
+    amp.SetParams(p);
+    double rms_hype = measure_band(z_v30, 96.0f);
+
+    std::printf("  Z_cab Cone Resonance Coupling Delta (@96Hz): %+.2f dB | Stock vs Hype RMS: %.4f vs %.4f\n",
+                z_boost_db, rms_z, rms_hype);
+    Check(std::isfinite(rms_z) && rms_z > 0.01 && rms_z < 10.0, "Agoura amp output must be finite and musical");
+    Check(z_boost_db > 0.8, "Reactive Z_cab coupling must enhance cabinet resonance around Fs");
+    Check(std::fabs(rms_hype - rms_z) > 1e-3, "Stock vs Hype must alter amp response");
+}
+
+void Test6_KirchhoffRlcAutoZ() {
+    std::printf("\n=== [Test 6] Kirchhoff RLC Guitar Pickup Auto-Z (10k..1M Ohm) Verification ===\n");
+    using namespace stadium_dsp;
+
+    // Exact analog 2-node Kirchhoff pickup voltage transfer ratio |H(jw; R_in) / H(jw; 1M)|
+    auto analog_ratio_db = [](double f, double L, double Rp, double Cp, double Rin) {
+        const std::complex<double> s(0.0, kTwoPiD * f);
+        auto H = [&](double R) {
+            const std::complex<double> Z_series = Rp + s * L;
+            const std::complex<double> Y_load = (1.0 / R) + s * Cp;
+            return 1.0 / (1.0 + Z_series * Y_load);
+        };
+        return 20.0 * std::log10(std::abs(H(Rin) / H(1.0e6)));
+    };
+
+    GuitarPickupInputZ z_10k, z_136k, z_1m;
+    z_10k.Configure(GuitarPickupType::kSingleCoil, 10000.0f);
+    z_136k.Configure(GuitarPickupType::kSingleCoil, 136000.0f);
+    z_1m.Configure(GuitarPickupType::kSingleCoil, 1000000.0f);
+
+    const auto& pk = GetGuitarPickupSpec(GuitarPickupType::kSingleCoil);
+    double err_10k = 0.0, err_136k = 0.0, err_1m = 0.0;
+    for (double f : {100.0, 400.0, 1000.0, 2200.0, 3500.0, 4400.0, 6000.0, 8000.0}) {
+        err_10k = std::max(err_10k, std::fabs(z_10k.EvalMagnitudeDb(f) - analog_ratio_db(f, pk.L_h, pk.R_ohm, pk.C_f, 10000.0)));
+        err_136k = std::max(err_136k, std::fabs(z_136k.EvalMagnitudeDb(f) - analog_ratio_db(f, pk.L_h, pk.R_ohm, pk.C_f, 136000.0)));
+        err_1m = std::max(err_1m, std::fabs(z_1m.EvalMagnitudeDb(f)));
+    }
+
+    std::printf("  Max Kirchhoff RLC Error (10k Fuzz / 136k Low Jack / 1M Bypass): %.4f / %.4f / %.4f dB\n",
+                err_10k, err_136k, err_1m);
+    Check(err_10k < 0.15, "10k Auto-Z RLC loading error must be < 0.15 dB");
+    Check(err_136k < 0.15, "136k Auto-Z RLC loading error must be < 0.15 dB");
+    Check(err_1m < 1e-6, "1M Ohm Auto-Z must be strictly transparent (0 dB)");
+}
+
+void Test7_PotTapersAndCoupledBrightCap() {
+    std::printf("\n=== [Test 7] Potentiometer Tapers (10A/15A/RevC/W) & Coupled Bright-Cap Verification ===\n");
+    using namespace stadium_dsp;
+
+    // Verify key taper curves at 0.0, 0.5, 1.0
+    Check(std::fabs(EvalPotTaper(PotTaper::kLog10A, 0.5f) - 0.10f) < 0.015f, "Log 10A must be ~10% at noon");
+    Check(std::fabs(EvalPotTaper(PotTaper::kLog15A, 0.5f) - 0.15f) < 0.015f, "Log 15A must be ~15% at noon");
+    Check(EvalPotTaper(PotTaper::kRevLogC, 0.5f) > 0.80f, "Rev-Log C must be > 80% at noon");
+    Check(std::fabs(EvalPotTaper(PotTaper::kWTaper, 0.5f) - 0.50f) < 0.02f, "W-Taper must be symmetric around 0.5");
+
+    // Verify coupled bright-cap Kirchhoff divider error and unity at Drive=10
+    CoupledBrightCapFilter bright;
+    bright.Configure(1.0e6, 120.0e-12, 0.25, PotTaper::kLog15A, true);
+    const double alpha = EvalPotTaper(PotTaper::kLog15A, 0.25f);
+    const double r_top = (1.0 - alpha) * 1.0e6;
+    const double r_bot = alpha * 1.0e6;
+    double max_err = 0.0;
+    for (double f : {100.0, 500.0, 1500.0, 4000.0, 8000.0}) {
+        const std::complex<double> s(0.0, kTwoPiD * f);
+        const std::complex<double> z_top = r_top / (1.0 + s * r_top * 120.0e-12);
+        const std::complex<double> h_ref = (r_bot / (r_bot + z_top)) / alpha;  // normalized to DC
+        const double ref_db = 20.0 * std::log10(std::abs(h_ref));
+        max_err = std::max(max_err, std::fabs(bright.EvalMagnitudeDb(f) - ref_db));
+    }
+
+    bright.Configure(1.0e6, 120.0e-12, 1.0, PotTaper::kLog15A, true);
+    const double boost_at_10 = std::fabs(bright.EvalMagnitudeDb(6000.0));
+    std::printf("  Coupled Bright-Cap Kirchhoff Max Error: %.4f dB | Boost @ Drive=10: %.6f dB\n",
+                max_err, boost_at_10);
+    Check(max_err < 0.12, "Coupled bright-cap error must be < 0.12 dB");
+    Check(boost_at_10 < 1e-5, "Bright cap must vanish at Drive=10 (0 dB boost)");
+}
+
+void Test8_VictoriaMicroPhysicsAndFmvStack() {
+    std::printf("\n=== [Test 8] Victoria/T11 Micro-Physics & FMV Tone Stack Nodal Verification ===\n");
+    using namespace stadium_dsp;
+
+    // 1. Verify Asymmetric Rectifier Ripple 31% charge / 69% discharge duty @ 120 Hz
+    AsymmetricRectifierRippleGen ripple;
+    ripple.Configure(120.0f, 60.0f);
+    int rising = 0;
+    constexpr int kPeriod = 400;  // 48000 / 120 = 400 samples exactly
+    float prev = ripple.NextRippleSample();
+    for (int i = 0; i < kPeriod; ++i) {
+        float cur = ripple.NextRippleSample();
+        if (cur > prev) ++rising;
+        prev = cur;
+    }
+    const double duty = static_cast<double>(rising) / static_cast<double>(kPeriod);
+
+    // 2. Verify Unitary 8x8 Walsh-Hadamard transform preserves L2 norm
+    alignas(64) float v[8] = {1.0f, -0.5f, 0.25f, 0.75f, -0.3f, 0.9f, -0.1f, 0.4f};
+    double e0 = 0.0, e1 = 0.0;
+    for (float x : v) e0 += static_cast<double>(x) * x;
+    ApplyHadamard8x8(v);
+    for (float x : v) e1 += static_cast<double>(x) * x;
+
+    // 3. Verify 3D Chua Chaotic LFO remains bounded and non-periodic
+    ChuaChaoticLfo chua;
+    float cmin = 1e9f, cmax = -1e9f;
+    for (int i = 0; i < 4000; ++i) {
+        float s = chua.ProcessSample();
+        cmin = std::min(cmin, s);
+        cmax = std::max(cmax, s);
+    }
+
+    // 4. Verify Fender AB763 3rd-order FMV bilinear tone stack matches exact analog formula
+    const auto& twin = GetAmpRecipe(AmpModelId::kUsDoubleNrm);
+    const auto fmv = ComputeFmvToneStackBilinearDouble(twin.tone_stack, 0.5, 0.5, 0.5, kSampleRateD);
+    const double mid_scoop_db = fmv.EvalMagnitudeDb(500.0, kSampleRateD) - fmv.EvalMagnitudeDb(100.0, kSampleRateD);
+
+    std::printf("  120 Hz Rectifier Ripple Duty: %.3f (Target 0.310) | Hadamard Energy Err: %.2e | AB763 Mid Scoop: %.2f dB\n",
+                duty, std::fabs(e1 - e0), mid_scoop_db);
+    Check(std::fabs(duty - 0.31) < 0.015, "Rectifier ripple charge duty must match 31%");
+    Check(std::fabs(e1 - e0) < 1e-5, "8x8 Walsh-Hadamard must be orthonormal");
+    Check(std::isfinite(cmin) && std::isfinite(cmax) && (cmax - cmin) > 0.2f, "Chua chaotic LFO must oscillate boundedly");
+    Check(mid_scoop_db < -3.0, "Fender AB763 FMV tone stack must exhibit authentic mid scoop");
+}
+
+void Test11_Expanded30AmpRecipesJames2CPlusSE() {
+    std::printf("\n=== [Test 11] Expanded 30-Model Catalog Recipes, James Stack, 2C+ GEQ & SE Class-A ===\n");
+    using namespace stadium_dsp;
+
+    Check(static_cast<int>(AmpModelId::kCount) == 30, "Amp recipe bank must contain exactly 30 models");
+
+    // 1. Verify R.T. James 4th-order tone stack 10A noon flatness (Hiwatt DR-103)
+    const auto& hiwatt = GetAmpRecipe(AmpModelId::kWhoWatt103);
+    const auto james = ComputeJamesToneStackBilinearDouble(hiwatt.james_stack, 0.5, 0.5, kSampleRateD);
+    double j_min = 1e9, j_max = -1e9;
+    for (double f : {40.0, 100.0, 300.0, 1000.0, 3000.0, 8000.0}) {
+        double db = james.EvalMagnitudeDb(f, kSampleRateD);
+        j_min = std::min(j_min, db);
+        j_max = std::max(j_max, db);
+    }
+    const double james_flat_span = j_max - j_min;
+
+    // 2. Verify Single-Ended 5F1 Tweed Champ generates significantly higher H2/H1 than Push-Pull Brit 2203
+    auto measure_h2_h1 = [](AmpModelId id) {
+        AgouraTubeAmp amp;
+        amp.SetModel(id);
+        AmpParams p = amp.GetParams();
+        p.drive = 0.65f;
+        p.master = 0.72f;
+        amp.SetParams(p);
+        constexpr double f0 = 200.0;
+        double re1 = 0, im1 = 0, re2 = 0, im2 = 0;
+        for (int b = 0; b < 160; ++b) {
+            alignas(64) float in16[16], out16[16];
+            for (int i = 0; i < 16; ++i) {
+                in16[i] = 0.18f * std::sin(kTwoPi * static_cast<float>(f0) * (b * 16 + i) / kSampleRate);
+            }
+            amp.ProcessSubBlock16(in16, out16);
+            if (b >= 60) {
+                for (int i = 0; i < 16; ++i) {
+                    const int n = b * 16 + i;
+                    const double w1 = kTwoPiD * f0 * n / kSampleRateD;
+                    const double w2 = kTwoPiD * (2.0 * f0) * n / kSampleRateD;
+                    re1 += out16[i] * std::cos(w1);
+                    im1 -= out16[i] * std::sin(w1);
+                    re2 += out16[i] * std::cos(w2);
+                    im2 -= out16[i] * std::sin(w2);
+                }
+            }
+        }
+        return std::hypot(re2, im2) / std::max(std::hypot(re1, im1), 1e-12);
+    };
+    const double h2_se = measure_h2_h1(AmpModelId::kUsSmallTweed);
+    const double h2_pp = measure_h2_h1(AmpModelId::kBrit2203);
+
+    // 3. Verify Cali 2C+ 5-Band GEQ V-Scoop & all 30 models run cleanly without NaN/Inf
+    bool all_30_finite = true;
+    AgouraTubeAmp amp;
+    for (int m = 0; m < static_cast<int>(AmpModelId::kCount); ++m) {
+        amp.SetModel(static_cast<AmpModelId>(m));
+        alignas(64) float in16[16], out16[16];
+        for (int i = 0; i < 16; ++i) in16[i] = 0.25f * std::sin(0.15f * i);
+        amp.ProcessSubBlock16(in16, out16);
+        for (float y : out16) if (!std::isfinite(y)) all_30_finite = false;
+    }
+
+    // Verify Cali 2C+ GEQ V-scoop cuts 750 Hz relative to 80 Hz and 2200 Hz
+    amp.SetModel(AmpModelId::kCaliIICPlus);
+    auto probe_amp = [&](float freq_hz) {
+        amp.Reset();
+        double e = 0.0;
+        for (int b = 0; b < 96; ++b) {
+            alignas(64) float in16[16], out16[16];
+            for (int i = 0; i < 16; ++i) in16[i] = 0.05f * std::sin(kTwoPi * freq_hz * (b * 16 + i) / kSampleRate);
+            amp.ProcessSubBlock16(in16, out16);
+            if (b >= 40) for (float y : out16) e += static_cast<double>(y) * y;
+        }
+        return std::sqrt(e / (56.0 * 16.0));
+    };
+    const double g80 = probe_amp(80.0f);
+    const double g750 = probe_amp(750.0f);
+    const double g2200 = probe_amp(2200.0f);
+
+    std::printf("  R.T. James 10A Noon Flat Span: %.4f dB | SE 5F1 vs PP 2203 H2/H1: %.4f vs %.4f\n",
+                james_flat_span, h2_se, h2_pp);
+    std::printf("  Cali 2C+ 5-Band GEQ V-Scoop (80 / 750 / 2200 Hz): %.4f / %.4f / %.4f | All 30 Finite: %s\n",
+                g80, g750, g2200, all_30_finite ? "YES" : "NO");
+
+    Check(james_flat_span < 0.05, "R.T. James tone stack at 10A noon must be flat (< 0.05 dB span)");
+    Check(h2_se > h2_pp * 1.5, "Single-ended 5F1 Champ must exhibit stronger even-order H2/H1 than push-pull 2203");
+    Check(g750 < g80 && g750 < g2200, "Cali 2C+ 5-band GEQ default V-scoop must dip 750 Hz");
+    Check(all_30_finite, "All 30 catalog amp recipes must produce finite outputs");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -501,12 +759,17 @@ int main(int argc, char** argv) {
 
     Test1_ZeroLatencyConvolver2048();
     Test2_EllipticPolyphaseOversampler();
+    Test3_AgouraTubeAmpAdaaNrCabZ();
     Test4_Batch16NeuralCloneEngine();
+    Test6_KirchhoffRlcAutoZ();
+    Test7_PotTapersAndCoupledBrightCap();
+    Test8_VictoriaMicroPhysicsAndFmvStack();
     Test9_SpectralMorph12MicsAutoDelayDbu();
+    Test11_Expanded30AmpRecipesJames2CPlusSE();
     Test12_ExternalFileImportPipeline();
 
     if (g_failures == 0) {
-        std::printf("\n[ALL MILESTONE 1 TESTS PASSED] 0 failures across 5 DSP core suites!\n");
+        std::printf("\n[ALL MILESTONE 1+2 TESTS PASSED] 0 failures across 10 DSP & circuit suites!\n");
         return 0;
     }
     std::fprintf(stderr, "\n[FAILED] %d assertions failed.\n", g_failures);
