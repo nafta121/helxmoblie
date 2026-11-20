@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Hx Mobile — Stadium DSP</string>
+    <string name="audio_service_channel_name">Stadium DSP Real-Time Audio</string>
+    <string name="audio_service_notification_title">Hx Mobile DSP Engine Active</string>
+    <string name="audio_service_notification_text">48 kHz Real-Time Guitar &amp; Bass Modeling Running</string>
+</resources>
