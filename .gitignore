@@ -1,0 +1,28 @@
+# Build outputs
+build/
+build_host/
+.gradle/
+app/build/
+app/.cxx/
+*.apk
+*.aab
+*.so
+*.a
+*.o
+
+# IDE & local config
+.idea/
+*.iml
+local.properties
+.DS_Store
+*.swp
+*~
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Generated demo audio
+*.wav
+!app/src/main/assets/**/*.wav
