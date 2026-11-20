@@ -615,13 +615,16 @@ public:
     }
 
     void ProcessSubBlock16(const float* in_mono16, float* out_l16, float* out_r16) noexcept {
+        alignas(64) float in_copy[kSubBlockSize];
+        std::memcpy(in_copy, in_mono16, sizeof(in_copy));
+
         std::memset(out_l16, 0, kSubBlockSize * sizeof(float));
         std::memset(out_r16, 0, kSubBlockSize * sizeof(float));
 
         const bool any_enabled = slots_[0].enabled || slots_[1].enabled;
         if (!any_enabled) {
-            std::memcpy(out_l16, in_mono16, kSubBlockSize * sizeof(float));
-            std::memcpy(out_r16, in_mono16, kSubBlockSize * sizeof(float));
+            std::memcpy(out_l16, in_copy, sizeof(in_copy));
+            std::memcpy(out_r16, in_copy, sizeof(in_copy));
             return;
         }
 
@@ -630,7 +633,7 @@ public:
         for (int s = 0; s < 2; ++s) {
             if (!slots_[s].enabled) continue;
             alignas(64) float conv16[kSubBlockSize];
-            convolvers_[s].ProcessSubBlock16(in_mono16, conv16);
+            convolvers_[s].ProcessSubBlock16(in_copy, conv16);
 
             const float gain = DbToLin(slots_[s].level_db) * slot_scale * (slots_[s].phase_invert ? -1.0f : 1.0f);
             const float pan = Clamp(slots_[s].pan, -1.0f, 1.0f);
