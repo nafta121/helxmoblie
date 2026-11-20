@@ -11,14 +11,21 @@
 #include "stadium_dsp/amp_precision_blocks.hpp"
 #include "stadium_dsp/amp_recipe_bank.hpp"
 #include "stadium_dsp/biquad_anticramp.hpp"
+#include "stadium_dsp/drive_fuzz_kernel.hpp"
 #include "stadium_dsp/dual_cab_convolver.hpp"
+#include "stadium_dsp/dynamic_fdn_reverb.hpp"
+#include "stadium_dsp/dynamics_gate_comp.hpp"
 #include "stadium_dsp/guitar_input_z.hpp"
 #include "stadium_dsp/lockfree_spsc.hpp"
+#include "stadium_dsp/modulation_bank.hpp"
 #include "stadium_dsp/neural_clone_engine.hpp"
 #include "stadium_dsp/oscillators_and_lfo.hpp"
+#include "stadium_dsp/pitch_synth_kernel.hpp"
 #include "stadium_dsp/polyphase_oversampler.hpp"
 #include "stadium_dsp/pot_tapers.hpp"
 #include "stadium_dsp/simd_utils.hpp"
+#include "stadium_dsp/tape_bbd_delay.hpp"
+#include "stadium_dsp/wah_parametric_eq.hpp"
 
 namespace {
 
@@ -750,6 +757,482 @@ void Test11_Expanded30AmpRecipesJames2CPlusSE() {
     Check(all_30_finite, "All 30 catalog amp recipes must produce finite outputs");
 }
 
+void Test10_DynamicsGateCompAndStudioEq() {
+    std::printf("\n=== [Test 10] Horizon Gate, LA-2A T4B Dual-Release Comp & Multi-Mode Studio EQ ===\n");
+    using namespace stadium_dsp;
+
+    // 1. LA-2A T4B optical dual-release memory: sustained compression holds longer GR than short transient
+    auto measure_residual_gr = [](int burst_blocks) {
+        StudioOptoVcaComp comp;
+        CompParams p;
+        p.enabled = true;
+        p.model = CompModel::kLaStudioOpto;
+        p.peak_reduction = 0.80f;
+        p.gain_db = 0.0f;
+        comp.SetParams(p);
+
+        for (int b = 0; b < burst_blocks; ++b) {
+            alignas(64) float in16[16], out16[16];
+            for (int i = 0; i < 16; ++i) in16[i] = 0.75f * std::sin(kTwoPi * 300.0f * (b * 16 + i) / kSampleRate);
+            comp.ProcessSubBlock16(in16, out16);
+        }
+        // Release for 120 ms (360 blocks of 16 samples @ 48 kHz)
+        for (int b = 0; b < 360; ++b) {
+            alignas(64) float z16[16] = {}, out16[16];
+            comp.ProcessSubBlock16(z16, out16);
+        }
+        return comp.GetCurrentGainReductionDb();
+    };
+    const float gr_short = measure_residual_gr(30);    // 10 ms burst
+    const float gr_sust = measure_residual_gr(1800);   // 600 ms sustained note
+
+    // 2. Horizon Precision Gate attenuation & GR getter
+    HorizonPrecisionGate gate;
+    GateParams gp;
+    gp.enabled = true;
+    gp.threshold_db = -35.0f;
+    gate.SetParams(gp);
+    for (int b = 0; b < 120; ++b) {
+        alignas(64) float quiet[16], out16[16];
+        for (int i = 0; i < 16; ++i) quiet[i] = 0.001f * std::sin(0.1f * i);
+        gate.ProcessSubBlock16(quiet, out16);
+    }
+    const float gate_gr = gate.GetCurrentGainReductionDb();
+
+    // 3. Studio EQ: Parametric + 10-Band Graphic + Tilt EQ + 128-point curve evaluator
+    StudioEqBlock eq;
+    EqParams ep;
+    ep.enabled = true;
+    ep.mode = EqMode::kGraphic10Band;
+    ep.graphic_gains_db[4] = -8.0f;  // 500 Hz cut
+    ep.graphic_gains_db[7] = +6.0f;  // 4 kHz boost
+    eq.SetParams(ep);
+    std::array<float, 128> curve{};
+    eq.EvaluateCurveDb(curve.data(), 128);
+    // Index ~59 is ~500 Hz, index ~98 is ~4 kHz on 20..20k log scale
+    const float c_500 = curve[59];
+    const float c_4k = curve[98];
+
+    std::printf("  LA-2A T4B Residual GR @ +120ms (Short vs Sustained): %.2f dB vs %.2f dB | Gate GR: %.1f dB | GEQ Curve(500/4k): %.1f / %+.1f dB\n",
+                gr_short, gr_sust, gate_gr, c_500, c_4k);
+    Check(gr_sust > gr_short + 1.5f, "LA-2A T4B sustained compression must hold noticeably longer optical memory");
+    Check(gate_gr > 12.0f, "Horizon Gate must report active gain reduction on quiet noise floor");
+    Check(c_500 < -4.0f && c_4k > 3.0f, "10-Band Graphic EQ curve evaluator must reflect cut/boost accurately");
+}
+
+void Test13_Modulation10Pitch5Wah8Bank() {
+    std::printf("\n=== [Test 13] Modulation (10), Pitch/Synth (5), & Wah/Filter (8) Hardware-Precision Bank ===\n");
+    using namespace stadium_dsp;
+
+    Check(static_cast<int>(ModulationModel::kCount) == 10, "Must provide 10 Modulation/Rotary models");
+    Check(static_cast<int>(PitchSynthModel::kCount) == 5, "Must provide 5 Pitch/Synth models");
+    Check(static_cast<int>(WahFilterModel::kCount) == 8, "Must provide 8 Wah/Filter models");
+
+    auto dft_mag = [](const std::vector<float>& buf, double freq_hz, size_t start) {
+        double re = 0.0, im = 0.0;
+        const size_t N = buf.size() - start;
+        for (size_t i = start; i < buf.size(); ++i) {
+            const double w = kTwoPiD * freq_hz * static_cast<double>(i) / kSampleRateD;
+            re += buf[i] * std::cos(w);
+            im -= buf[i] * std::sin(w);
+        }
+        return 2.0 * std::hypot(re, im) / static_cast<double>(N);
+    };
+
+    // 1. Boctaver (BOSS OC-2 CMOS ÷2, ÷4): 220 Hz -> 110 Hz & 55 Hz sub-octaves
+    PitchSynthBlock pitch;
+    PitchParams pp;
+    pp.enabled = true;
+    pp.model = PitchSynthModel::kBoctaverOc2;
+    pp.oct1_level = 0.9f;
+    pp.oct2_level = 0.8f;
+    pp.dry_level = 0.0f;
+    pitch.SetParams(pp);
+    std::vector<float> p_out(4096);
+    for (size_t off = 0; off < p_out.size(); off += 16) {
+        alignas(64) float in16[16];
+        for (int i = 0; i < 16; ++i) in16[i] = 0.6f * std::sin(kTwoPi * 220.0f * (off + i) / kSampleRate);
+        pitch.ProcessSubBlock16(in16, &p_out[off]);
+    }
+    const double oc2_110 = dft_mag(p_out, 110.0, 1024);
+    const double oc2_55 = dft_mag(p_out, 55.0, 1024);
+
+    // 2. Poly Capo (-12st: 220 Hz -> 110 Hz) & Pitch Wham (+12st: 440 Hz -> 880 Hz)
+    pp.model = PitchSynthModel::kPolyCapo;
+    pp.semitones = -12.0f;
+    pp.mix = 1.0f;
+    pitch.Reset();
+    pitch.SetParams(pp);
+    for (size_t off = 0; off < p_out.size(); off += 16) {
+        alignas(64) float in16[16];
+        for (int i = 0; i < 16; ++i) in16[i] = 0.6f * std::sin(kTwoPi * 220.0f * (off + i) / kSampleRate);
+        pitch.ProcessSubBlock16(in16, &p_out[off]);
+    }
+    const double capo_110 = dft_mag(p_out, 110.0, 1536);
+
+    // 3. Script Phase 90 4-stage allpass notch depth (> 28 dB)
+    StereoModulationEngine mod;
+    ModParams mp;
+    mp.enabled = true;
+    mp.model = ModulationModel::kScriptPhase90;
+    mp.rate_hz = 0.0f;  // freeze LFO for static notch measurement
+    mp.depth = 0.5f;
+    mp.feedback = 0.0f;
+    mp.mix = 0.5f;
+    mod.SetParams(mp);
+    auto probe_mod = [&](float freq_hz) {
+        mod.Reset();
+        mod.SetParams(mp);
+        double e = 0.0;
+        for (int b = 0; b < 96; ++b) {
+            alignas(64) float in16[16], l16[16], r16[16];
+            for (int i = 0; i < 16; ++i) in16[i] = 0.5f * std::sin(kTwoPi * freq_hz * (b * 16 + i) / kSampleRate);
+            mod.ProcessSubBlock16(in16, in16, l16, r16);
+            if (b >= 48) for (float y : l16) e += static_cast<double>(y) * y;
+        }
+        return std::sqrt(e / (48.0 * 16.0));
+    };
+    double ph_min = 1e9, ph_max = 0.0;
+    for (float f = 150.0f; f <= 3000.0f; f *= 1.02f) {
+        double m = probe_mod(f);
+        ph_min = std::min(ph_min, m);
+        ph_max = std::max(ph_max, m);
+    }
+    const double ph_notch_db = 20.0 * std::log10((ph_max + 1e-12) / (ph_min + 1e-12));
+
+    // 4. Brownface Harmonic Tremolo: Lo & Hi crossover envelopes oscillate strictly anti-phase (corr < -0.70)
+    mp.model = ModulationModel::kHarmonicTremolo;
+    mp.rate_hz = 5.0f;
+    mp.depth = 0.9f;
+    mp.mix = 1.0f;
+    StereoModulationEngine mod_lo, mod_hi;
+    mod_lo.SetParams(mp);
+    mod_hi.SetParams(mp);
+    std::vector<double> env_lo, env_hi;
+    double acc_lo = 0.0, acc_hi = 0.0;
+    int frame_cnt = 0;
+    for (int b = 0; b < 1200; ++b) {
+        alignas(64) float lo_in[16], hi_in[16], lo_l[16], lo_r[16], hi_l[16], hi_r[16];
+        for (int i = 0; i < 16; ++i) {
+            lo_in[i] = 0.5f * std::sin(kTwoPi * 120.0f * (b * 16 + i) / kSampleRate);
+            hi_in[i] = 0.5f * std::sin(kTwoPi * 2400.0f * (b * 16 + i) / kSampleRate);
+        }
+        mod_lo.ProcessSubBlock16(lo_in, lo_in, lo_l, lo_r);
+        mod_hi.ProcessSubBlock16(hi_in, hi_in, hi_l, hi_r);
+        if (b >= 75) {
+            for (int i = 0; i < 16; ++i) { acc_lo += std::fabs(lo_l[i]); acc_hi += std::fabs(hi_l[i]); }
+            if (++frame_cnt == 25) {  // Exactly 400 samples = 1 full 120 Hz cycle & 20 full 2400 Hz cycles
+                env_lo.push_back(acc_lo);
+                env_hi.push_back(acc_hi);
+                acc_lo = 0.0;
+                acc_hi = 0.0;
+                frame_cnt = 0;
+            }
+        }
+    }
+    double mean_l = 0, mean_h = 0;
+    for (size_t i = 0; i < env_lo.size(); ++i) { mean_l += env_lo[i]; mean_h += env_hi[i]; }
+    mean_l /= env_lo.size(); mean_h /= env_hi.size();
+    double cov = 0, vl = 0, vh = 0;
+    for (size_t i = 0; i < env_lo.size(); ++i) {
+        cov += (env_lo[i] - mean_l) * (env_hi[i] - mean_h);
+        vl += (env_lo[i] - mean_l) * (env_lo[i] - mean_l);
+        vh += (env_hi[i] - mean_h) * (env_hi[i] - mean_h);
+    }
+    const double harm_corr = cov / std::max(std::sqrt(vl * vh), 1e-12);
+
+    // 5. Wah & Filter bank: Mutant Filter Up tracks envelope dynamically & all 8 models finite
+    InductorWahPedal wah;
+    WahParams wp;
+    wp.enabled = true;
+    wp.model = WahFilterModel::kMutantFilterUp;
+    wah.SetParams(wp);
+    auto probe_wah = [&](float amp) {
+        wah.Reset();
+        double e = 0.0;
+        for (int b = 0; b < 96; ++b) {
+            alignas(64) float in16[16], out16[16];
+            for (int i = 0; i < 16; ++i) in16[i] = amp * std::sin(kTwoPi * 1600.0f * (b * 16 + i) / kSampleRate);
+            wah.ProcessSubBlock16(in16, out16);
+            if (b >= 48) for (float y : out16) e += static_cast<double>(y) * y;
+        }
+        return std::sqrt(e / (48.0 * 16.0)) / std::max(amp, 1e-6f);
+    };
+    const double wah_soft = probe_wah(0.03f);
+    const double wah_hard = probe_wah(0.65f);
+
+    std::printf("  Boctaver OC-2 (110/55Hz): %.4f / %.4f | PolyCapo -12st: %.4f | Phase90 Notch: %.2f dB | HarmTrem Corr: %.3f | Mutant Soft->Hard: %.3f -> %.3f\n",
+                oc2_110, oc2_55, capo_110, ph_notch_db, harm_corr, wah_soft, wah_hard);
+    Check(oc2_110 > 0.08 && oc2_55 > 0.05, "Boctaver OC-2 must generate both -1 and -2 octaves");
+    Check(capo_110 > 0.06, "Poly Capo WSOLA -12st must shift 220 Hz to 110 Hz");
+    Check(ph_notch_db > 28.0, "Script Phase 90 4-stage allpass must create deep > 28 dB notch");
+    Check(harm_corr < -0.70, "Brownface Harmonic Tremolo low/high bands must modulate anti-phase");
+    Check(wah_hard > wah_soft * 1.4, "Mutant Filter Up must sweep open on harder picking");
+}
+
+void Test14_ExpandedDelay7AndReverb7Bank() {
+    std::printf("\n=== [Test 14] Expanded Delay (7) & Reverb (7) Catalog Bank ===\n");
+    using namespace stadium_dsp;
+
+    Check(static_cast<int>(DelayModel::kCount) == 7, "Must provide 7 Delay catalog models");
+    Check(static_cast<int>(ReverbModel::kCount) == 7, "Must provide 7 Reverb catalog models");
+
+    // 1. Cosmos Echo RE-201 3-Head geometry (0.382T / 0.685T / 1.000T)
+    StereoTapeBbdDelay dly;
+    DelayParams dp;
+    dp.enabled = true;
+    dp.model = DelayModel::kCosmosEcho;
+    dp.time_ms = 200.0f;  // 9600 samples -> H1=3667, H2=6576, H3=9600
+    dp.feedback = 0.0f;
+    dp.mix = 1.0f;
+    dp.head_mode = 7;  // bitmask 111 = all 3 heads active
+    dp.spring_mix = 0.0f;
+    dly.SetParams(dp);
+    std::vector<float> imp_out(12000, 0.0f);
+    for (size_t off = 0; off < imp_out.size(); off += 16) {
+        alignas(64) float in16[16] = {}, outR[16];
+        if (off == 0) in16[0] = 1.0f;
+        dly.ProcessSubBlock16(in16, in16, &imp_out[off], outR);
+    }
+    auto peak_near = [&](size_t center) {
+        float pk = 0.0f;
+        for (size_t i = center - 48; i <= center + 48 && i < imp_out.size(); ++i) pk = std::max(pk, std::fabs(imp_out[i]));
+        return pk;
+    };
+    const float h1 = peak_near(static_cast<size_t>(9600 * 0.382));
+    const float h2 = peak_near(static_cast<size_t>(9600 * 0.685));
+    const float h3 = peak_near(9600);
+
+    // 2. Adriatic Overclocked BBD vs Stock DM-2 @ 3.6 kHz
+    auto probe_bbd_hf = [](DelayModel m, float rate_scale) {
+        StereoTapeBbdDelay d;
+        DelayParams p;
+        p.enabled = true;
+        p.model = m;
+        p.time_ms = 120.0f;
+        p.feedback = 0.0f;
+        p.mix = 1.0f;
+        p.bbd_rate_scale = rate_scale;
+        d.SetParams(p);
+        double e = 0.0;
+        for (int b = 0; b < 600; ++b) {
+            alignas(64) float in16[16], outL[16], outR[16];
+            for (int i = 0; i < 16; ++i) in16[i] = 0.5f * std::sin(kTwoPi * 3600.0f * (b * 16 + i) / kSampleRate);
+            d.ProcessSubBlock16(in16, in16, outL, outR);
+            if (b >= 450) for (float y : outL) e += static_cast<double>(y) * y;
+        }
+        return std::sqrt(e / (150.0 * 16.0));
+    };
+    const double dm2_hf = probe_bbd_hf(DelayModel::kBucketBrigade, 1.0f);
+    const double adr_hf = probe_bbd_hf(DelayModel::kAdriaticDelay, 2.2f);
+
+    // 3. '63 Spring 6G15 Helical Chirp Dispersion (36-stage allpass @ 2.85 kHz)
+    DynamicFdnReverb rev;
+    ReverbParams rp;
+    rp.enabled = true;
+    rp.model = ReverbModel::kSpring63;
+    rp.decay = 0.6f;
+    rp.mix = 1.0f;
+    rev.SetParams(rp);
+    const double disp_ms = rev.MeasureSpringChirpDispersionMs();
+
+    // 4. Searchlights +1 Oct shimmer energy (440 Hz generated from 220 Hz input)
+    rp.model = ReverbModel::kSearchlights;
+    rp.decay = 0.75f;
+    rp.mix = 1.0f;
+    rp.shimmer_amount = 0.85f;
+    rev.Reset();
+    rev.SetParams(rp);
+    std::vector<float> sl_out(16384);
+    for (size_t off = 0; off < sl_out.size(); off += 16) {
+        alignas(64) float in16[16], outR[16];
+        for (int i = 0; i < 16; ++i) in16[i] = 0.45f * std::sin(kTwoPi * 220.0f * (off + i) / kSampleRate);
+        rev.ProcessSubBlock16(in16, in16, &sl_out[off], outR);
+    }
+    double re440 = 0.0, im440 = 0.0;
+    for (size_t i = 8192; i < sl_out.size(); ++i) {
+        const double w = kTwoPiD * 440.0 * static_cast<double>(i) / kSampleRateD;
+        re440 += sl_out[i] * std::cos(w);
+        im440 -= sl_out[i] * std::sin(w);
+    }
+    const double sl_440_mag = 2.0 * std::hypot(re440, im440) / 8192.0;
+
+    // 5. Glitz stereo width (side RMS > 0.05)
+    rp.model = ReverbModel::kGlitz;
+    rev.Reset();
+    rev.SetParams(rp);
+    double side_e = 0.0;
+    for (int b = 0; b < 400; ++b) {
+        alignas(64) float in16[16], outL[16], outR[16];
+        for (int i = 0; i < 16; ++i) in16[i] = (b < 40) ? 0.5f * std::sin(kTwoPi * 330.0f * (b * 16 + i) / kSampleRate) : 0.0f;
+        rev.ProcessSubBlock16(in16, in16, outL, outR);
+        if (b >= 60) for (int i = 0; i < 16; ++i) {
+            const double sd = 0.5 * (outL[i] - outR[i]);
+            side_e += sd * sd;
+        }
+    }
+    const double glitz_side = std::sqrt(side_e / (340.0 * 16.0));
+
+    std::printf("  Cosmos RE-201 3-Head Peaks: %.3f / %.3f / %.3f | Adriatic vs DM-2 @3.6kHz: %.4f vs %.4f\n",
+                h1, h2, h3, adr_hf, dm2_hf);
+    std::printf("  '63 Spring Chirp Dispersion: +%.2f ms | Searchlights +1 Oct (440Hz): %.5f | Glitz Side RMS: %.4f\n",
+                disp_ms, sl_440_mag, glitz_side);
+
+    Check(h1 > 0.15f && h2 > 0.15f && h3 > 0.15f, "Cosmos Echo RE-201 must produce all 3 playback head echoes");
+    Check(adr_hf > dm2_hf * 3.0, "Adriatic overclocked MN3102 BBD must preserve much more 3.6 kHz bandwidth than stock DM-2");
+    Check(disp_ms > 2.5, "'63 Spring 36-stage helical allpass must exhibit measurable positive chirp dispersion");
+    Check(sl_440_mag > 0.001, "Searchlights shimmer reverb must synthesize +1 Octave (440 Hz) tail");
+    Check(glitz_side > 0.03, "Glitz bloom reverb must generate rich stereo side decorrelation");
+}
+
+void Test15_Expanded12ModelDriveFuzzBoostBank() {
+    std::printf("\n=== [Test 15] Expanded 12-Model Drive / Overdrive / Fuzz / Boost Hardware Bank ===\n");
+    using namespace stadium_dsp;
+
+    Check(static_cast<int>(DriveFuzzModel::kCount) == 12, "Must provide exactly 12 Drive/Fuzz/Boost models");
+
+    auto measure_thd = [](DriveFuzzModel m, float drive, int voice_mode) {
+        DriveFuzzPedal ped;
+        DriveFuzzParams p;
+        p.enabled = true;
+        p.model = m;
+        p.drive = drive;
+        p.tone = 0.5f;
+        p.level = 0.7f;
+        p.voice_mode = voice_mode;
+        ped.SetParams(p);
+        constexpr double f0 = 250.0;
+        double re1 = 0, im1 = 0, re2 = 0, im2 = 0, re3 = 0, im3 = 0;
+        for (int b = 0; b < 160; ++b) {
+            alignas(64) float in16[16], out16[16];
+            for (int i = 0; i < 16; ++i) in16[i] = 0.22f * std::sin(kTwoPi * static_cast<float>(f0) * (b * 16 + i) / kSampleRate);
+            ped.ProcessSubBlock16(in16, out16);
+            if (b >= 60) {
+                for (int i = 0; i < 16; ++i) {
+                    const int n = b * 16 + i;
+                    const double w1 = kTwoPiD * f0 * n / kSampleRateD;
+                    const double w2 = 2.0 * w1;
+                    const double w3 = 3.0 * w1;
+                    re1 += out16[i] * std::cos(w1); im1 -= out16[i] * std::sin(w1);
+                    re2 += out16[i] * std::cos(w2); im2 -= out16[i] * std::sin(w2);
+                    re3 += out16[i] * std::cos(w3); im3 -= out16[i] * std::sin(w3);
+                }
+            }
+        }
+        const double h1 = std::max(std::hypot(re1, im1), 1e-12);
+        const double h2 = std::hypot(re2, im2);
+        const double h3 = std::hypot(re3, im3);
+        return std::pair<double, double>{std::hypot(h2, h3) / h1, h2 / h1};
+    };
+
+    // 1. Minotaur (Klon) dual-gang clean/dirty blend
+    const double klon_lo = measure_thd(DriveFuzzModel::kMinotaur, 0.0f, 0).first;
+    const double klon_hi = measure_thd(DriveFuzzModel::kMinotaur, 0.9f, 0).first;
+
+    // 2. Teemah! (Timmy) flat transparent response at drive=0, bass=0, treble=0
+    DriveFuzzPedal timmy;
+    DriveFuzzParams tp;
+    tp.enabled = true;
+    tp.model = DriveFuzzModel::kTeemah;
+    tp.drive = 0.0f;
+    tp.bass_cut = 0.0f;
+    tp.tone = 0.0f;
+    tp.level = 0.5f;
+    timmy.SetParams(tp);
+    double tmin = 1e9, tmax = -1e9;
+    for (float f : {110.0f, 350.0f, 1000.0f, 3500.0f}) {
+        timmy.Reset();
+        double e = 0.0;
+        for (int b = 0; b < 400; ++b) {
+            alignas(64) float in16[16], out16[16];
+            for (int i = 0; i < 16; ++i) in16[i] = 0.04f * std::sin(kTwoPi * f * (b * 16 + i) / kSampleRate);
+            timmy.ProcessSubBlock16(in16, out16);
+            if (b >= 100) for (float y : out16) e += static_cast<double>(y) * y;
+        }
+        const double db = 10.0 * std::log10(e + 1e-20);
+        tmin = std::min(tmin, db);
+        tmax = std::max(tmax, db);
+    }
+    const double timmy_flat_span = tmax - tmin;
+
+    // 3. Heir Apparent (Prince of Tone) 3-way Boost < OD < Dist harmonics
+    const double pot_boost = measure_thd(DriveFuzzModel::kHeirApparent, 0.65f, 0).first;
+    const double pot_od = measure_thd(DriveFuzzModel::kHeirApparent, 0.65f, 1).first;
+    const double pot_dist = measure_thd(DriveFuzzModel::kHeirApparent, 0.65f, 2).first;
+
+    // 4. Compulsive Drive (OCD) HP/LP voicing + MOSFET/Ge even harmonics
+    const double ocd_h2 = measure_thd(DriveFuzzModel::kCompulsiveDrive, 0.65f, 1).second;
+    auto probe_ocd_1850 = [](int hp_mode) {
+        DriveFuzzPedal o;
+        DriveFuzzParams op;
+        op.enabled = true;
+        op.model = DriveFuzzModel::kCompulsiveDrive;
+        op.drive = 0.3f;
+        op.voice_mode = hp_mode;
+        o.SetParams(op);
+        double e_mid = 0.0, e_low = 0.0;
+        for (int pass = 0; pass < 2; ++pass) {
+            o.Reset();
+            const float f = pass == 0 ? 1850.0f : 250.0f;
+            for (int b = 0; b < 96; ++b) {
+                alignas(64) float in16[16], out16[16];
+                for (int i = 0; i < 16; ++i) in16[i] = 0.05f * std::sin(kTwoPi * f * (b * 16 + i) / kSampleRate);
+                o.ProcessSubBlock16(in16, out16);
+                if (b >= 48) for (float y : out16) (pass == 0 ? e_mid : e_low) += static_cast<double>(y) * y;
+            }
+        }
+        return std::sqrt(e_mid / std::max(e_low, 1e-12));
+    };
+    const double ocd_hp = probe_ocd_1850(1);
+    const double ocd_lp = probe_ocd_1850(0);
+
+    // 5. Big Muff 3-Node Kirchhoff MNA tone stack accuracy @ 4x (192 kHz)
+    const auto bm_coeffs = ComputeBigMuffToneStackBilinear(39000.0, 3.3e-9, 39000.0, 12.0e-9, 100000.0, 0.5, kSampleRateD * 4.0);
+    double bm_err = 0.0;
+    for (double f : {80.0, 300.0, 700.0, 1500.0, 4000.0}) {
+        const std::complex<double> s(0.0, kTwoPiD * f);
+        const std::complex<double> zh = 39000.0 / (1.0 + s * 39000.0 * 3.3e-9);
+        const std::complex<double> vh = (s * 39000.0 * 3.3e-9) / (1.0 + s * 39000.0 * 3.3e-9);
+        const std::complex<double> zl = 39000.0 / (1.0 + s * 39000.0 * 12.0e-9);
+        const std::complex<double> vl = 1.0 / (1.0 + s * 39000.0 * 12.0e-9);
+        const std::complex<double> href = ((50000.0 + zl) * vh + (50000.0 + zh) * vl) / (100000.0 + zh + zl);
+        const double ref_db = 20.0 * std::log10(std::abs(href));
+        bm_err = std::max(bm_err, std::fabs(bm_coeffs.MagnitudeDb(f, kSampleRateD * 4.0) - ref_db));
+    }
+
+    // 6. Verify Auto-Z ohms & all 12 pedals finite
+    Check(GetDriveAutoZOhms(DriveFuzzModel::kArbitratorFuzz) == 10000.0f, "Arbitrator Fuzz Auto-Z must be 10k");
+    Check(GetDriveAutoZOhms(DriveFuzzModel::kDerangedMaster) == 10000.0f, "Deranged Master Auto-Z must be 10k");
+    Check(GetDriveAutoZOhms(DriveFuzzModel::kBighornFuzz) == 136000.0f, "Bighorn Big Muff Auto-Z must be 136k");
+    Check(GetDriveAutoZOhms(DriveFuzzModel::kScream808) == 230000.0f, "Scream 808 Auto-Z must be 230k");
+
+    bool all_12_ok = true;
+    for (int m = 0; m < 12; ++m) {
+        DriveFuzzPedal p;
+        DriveFuzzParams dp;
+        dp.enabled = true;
+        dp.model = static_cast<DriveFuzzModel>(m);
+        p.SetParams(dp);
+        alignas(64) float in16[16], out16[16];
+        for (int i = 0; i < 16; ++i) in16[i] = 0.25f * std::sin(0.2f * i);
+        p.ProcessSubBlock16(in16, out16);
+        for (float y : out16) if (!std::isfinite(y)) all_12_ok = false;
+    }
+
+    std::printf("  Minotaur Gain 0 vs 9 THD: %.4f vs %.4f | Teemah! Flat Span: %.4f dB\n", klon_lo, klon_hi, timmy_flat_span);
+    std::printf("  Heir Apparent (Boost/OD/Dist): %.4f < %.4f < %.4f | OCD HP/LP: %.3f vs %.3f (H2/H1=%.4f)\n",
+                pot_boost, pot_od, pot_dist, ocd_hp, ocd_lp, ocd_h2);
+    std::printf("  Big Muff 3-Node Kirchhoff MNA Max Error: %.4f dB | All 12 Pedals Finite: %s\n",
+                bm_err, all_12_ok ? "YES" : "NO");
+
+    Check(klon_hi > klon_lo * 5.0, "Minotaur Klon must blend clean at low gain to 1N34A Ge clip at high gain");
+    Check(timmy_flat_span < 0.08, "Teemah! Timmy must be transparently flat (< 0.08 dB)");
+    Check(pot_boost < pot_od && pot_od < pot_dist, "Heir Apparent must satisfy Boost < OD < Dist harmonics");
+    Check(ocd_hp > ocd_lp * 1.4 && ocd_h2 > 0.02, "OCD HP mode must boost 1.85 kHz and exhibit asymmetric MOSFET+Ge H2");
+    Check(bm_err < 0.08, "Big Muff 3-node Kirchhoff MNA error @ 4x must be < 0.08 dB");
+    Check(all_12_ok, "All 12 Drive/Fuzz/Boost models must produce finite outputs");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -765,11 +1248,15 @@ int main(int argc, char** argv) {
     Test7_PotTapersAndCoupledBrightCap();
     Test8_VictoriaMicroPhysicsAndFmvStack();
     Test9_SpectralMorph12MicsAutoDelayDbu();
+    Test10_DynamicsGateCompAndStudioEq();
     Test11_Expanded30AmpRecipesJames2CPlusSE();
     Test12_ExternalFileImportPipeline();
+    Test13_Modulation10Pitch5Wah8Bank();
+    Test14_ExpandedDelay7AndReverb7Bank();
+    Test15_Expanded12ModelDriveFuzzBoostBank();
 
     if (g_failures == 0) {
-        std::printf("\n[ALL MILESTONE 1+2 TESTS PASSED] 0 failures across 10 DSP & circuit suites!\n");
+        std::printf("\n[ALL MILESTONE 1-3 TESTS PASSED] 0 failures across 14 DSP & circuit suites!\n");
         return 0;
     }
     std::fprintf(stderr, "\n[FAILED] %d assertions failed.\n", g_failures);

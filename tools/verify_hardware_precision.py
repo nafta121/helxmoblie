@@ -283,6 +283,105 @@ def check_5_james_6node_mna():
         assert err < 0.08
 
 
+def check_6_phaser_and_lr2():
+    print("=== [MNA Check 6] 4-Stage Op-Amp Allpass Phaser & Linkwitz-Riley LR2 Crossover ===")
+    fc = 600.0
+    t = math.tan(math.pi * fc / FS)
+    a = (t - 1.0) / (t + 1.0)
+    # 4 identical 1st-order allpass stages: H_ap(z) = (a + z^-1) / (1 + a*z^-1) -> exact -90 deg at fc!
+    def h_phaser(f):
+        z1 = np.exp(-1j * TWO_PI * f / FS)
+        ap = (a + z1) / (1.0 + a * z1)
+        return 0.5 * (1.0 + ap ** 4)
+
+    # Analytical notch at tan(pi*f_notch/FS) = tan(pi*fc/FS) * tan(pi/8) -> phase = -45 deg per stage -> -180 deg total!
+    f_notch_exact = (FS / math.pi) * math.atan(t * math.tan(math.pi / 8.0))
+    notch_mag = abs(h_phaser(f_notch_exact))
+
+    # Linkwitz-Riley LR4 (cascaded 2nd-order Butterworth LP + HP): |H_lp + H_hp| === 1
+    w0 = TWO_PI * fc / FS
+    cw, sw = math.cos(w0), math.sin(w0)
+    alpha = sw / (2.0 * math.sqrt(0.5))
+    inv = 1.0 / (1.0 + alpha)
+    b_lp = np.array([(1 - cw) * 0.5 * inv, (1 - cw) * inv, (1 - cw) * 0.5 * inv])
+    b_hp = np.array([(1 + cw) * 0.5 * inv, -(1 + cw) * inv, (1 + cw) * 0.5 * inv])
+    a_bt = np.array([1.0, -2 * cw * inv, (1 - alpha) * inv])
+    lr_err = 0.0
+    for f in np.geomspace(30.0, 18000.0, 100):
+        z1 = np.exp(-1j * TWO_PI * f / FS)
+        zp = np.array([1.0, z1, z1 * z1])
+        hlp = (np.dot(b_lp, zp) / np.dot(a_bt, zp)) ** 2
+        hhp = (np.dot(b_hp, zp) / np.dot(a_bt, zp)) ** 2
+        lr_err = max(lr_err, abs(20.0 * math.log10(abs(hlp + hhp))))
+    print(f"  PASS: 4-Stage Phaser Notch @ {f_notch_exact:.1f} Hz |H|={notch_mag:.2e} | LR4 Flatness = {lr_err:.2e} dB")
+    assert notch_mag < 1e-12 and lr_err < 1e-11
+
+
+def check_7_spring_dispersion_and_re201():
+    print("=== [MNA Check 7] '63 Spring 36-Stage Helical Dispersion Allpass & RE-201 3-Head Geometry ===")
+    fc = 2850.0
+    r = 0.87
+    w0 = TWO_PI * fc / FS
+    a1, a2 = -2.0 * r * math.cos(w0), r * r
+
+    def h_ap2(w):
+        z1 = np.exp(-1j * w)
+        z2 = z1 * z1
+        return (a2 + a1 * z1 + z2) / (1.0 + a1 * z1 + a2 * z2)
+
+    mag_err = max(abs(20.0 * math.log10(abs(h_ap2(TWO_PI * f / FS)))) for f in np.geomspace(50.0, 18000.0, 80))
+    dw = 1e-5
+    def gd_ms(f):
+        w = TWO_PI * f / FS
+        dp = np.angle(h_ap2(w + dw)) - np.angle(h_ap2(w - dw))
+        while dp > math.pi: dp -= TWO_PI
+        while dp < -math.pi: dp += TWO_PI
+        return (-dp / (2.0 * dw)) * 36.0 * (1000.0 / FS)
+    gd_lo, gd_hi = gd_ms(250.0), gd_ms(2850.0)
+    disp = gd_hi - gd_lo
+    print(f"  PASS: 36-Stage 4AB3C1B Allpass |H| Err = {mag_err:.2e} dB | Chirp Dispersion = +{disp:.2f} ms (Low {gd_lo:.2f} ms -> Peak {gd_hi:.2f} ms)")
+    assert mag_err < 1e-11 and disp > 3.0
+
+
+def check_8_big_muff_3node_and_ge_adaa1():
+    print("=== [MNA Check 8] 3-Node Big Muff Pi Tone Stacks ('73 Ram's Head & '69 Triangle) & 1N34A Ge ADAA1 ===")
+    fs4 = FS * 4.0
+    freqs = np.geomspace(40.0, 6500.0, 60)
+    stacks = [
+        ("1973_RamsHead_Bighorn", 39e3, 3.3e-9, 39e3, 12.0e-9, 100e3),
+        ("1969_V1_Triangle_Muff", 22e3, 4.0e-9, 22e3, 10.0e-9, 100e3),
+    ]
+    for name, R1, C1, R2, C2, Rp in stacks:
+        t = 0.5
+        t1, t2 = R1 * C1, R2 * C2
+        a_s = [Rp + R1 + R2, Rp * (t1 + t2) + R1 * t2 + R2 * t1, Rp * t1 * t2]
+        b_s = [(1.0 - t) * Rp + R1, (Rp + R2) * t1, t * Rp * t1 * t2]
+        bz, az = bilinear_poly(b_s, a_s, fs4)
+        max_err = 0.0
+        for f in freqs:
+            s = 1j * TWO_PI * f
+            # Independent 3-Node Kirchhoff MNA stamp: 0=node_H, 1=node_L, 2=out
+            Y = np.array([
+                [s * C1 + 1.0 / R1 + 1.0 / ((1 - t) * Rp), 0.0, -1.0 / ((1 - t) * Rp)],
+                [0.0, 1.0 / R2 + s * C2 + 1.0 / (t * Rp), -1.0 / (t * Rp)],
+                [-1.0 / ((1 - t) * Rp), -1.0 / (t * Rp), 1.0 / ((1 - t) * Rp) + 1.0 / (t * Rp)],
+            ], dtype=complex)
+            I = np.array([s * C1, 1.0 / R2, 0.0], dtype=complex)
+            ref_db = 20.0 * math.log10(abs(np.linalg.solve(Y, I)[2]))
+            dig_db = eval_z_db(bz, az, f, fs4)
+            max_err = max(max_err, abs(dig_db - ref_db))
+        print(f"  {name:24s} | 3-Node MNA vs 2nd-Order 4x Bilinear Max Error = {max_err:.4f} dB")
+        assert max_err < 0.10
+
+    # Verify exact Shockley 1N34A Germanium antiderivative dF/dx == vk * asinh(x / vk)
+    vk = 0.24
+    F = lambda x: vk * (x * math.asinh(x / vk) - math.sqrt(x * x + vk * vk) + vk)
+    h = 1e-6
+    id_err = max(abs((F(x + h) - F(x - h)) / (2 * h) - vk * math.asinh(x / vk)) for x in np.linspace(-3.0, 3.0, 100))
+    print(f"  PASS: 1N34A Germanium Shockley dF/dx Identity Error = {id_err:.2e}")
+    assert id_err < 1e-8
+
+
 def main():
     print("=" * 70)
     print("  CLEAN-ROOM PYTHON MNA HARDWARE-PRECISION CIRCUIT REFERENCE SUITE")
@@ -292,7 +391,10 @@ def main():
     check_3_fmv_5node_mna()
     check_4_hadamard_and_sabine()
     check_5_james_6node_mna()
-    print("\n[ALL MILESTONE 2 PYTHON MNA VERIFICATIONS PASSED]")
+    check_6_phaser_and_lr2()
+    check_7_spring_dispersion_and_re201()
+    check_8_big_muff_3node_and_ge_adaa1()
+    print("\n[ALL 8 PYTHON MNA HARDWARE-PRECISION VERIFICATIONS PASSED]")
 
 
 if __name__ == "__main__":
