@@ -249,56 +249,56 @@ helxmoblie/
 Prinsip urutan kerja dari audit sesi sebelumnya tetap dipertahankan: **selesaikan fondasi mesin backend/DSP terlebih dahulu (4 Paket Fondasi mencakup 23 GAP) sebelum merakit antarmuka UI/UX akhir**, agar tidak ada satu pun tombol kosmetik kosong di layar.
 
 ### Fase 0 — Inisialisasi Repo Git, Setup Environment, & Basis Inti DSP/Android
-- [ ] **0.1** Konfirmasi Jalur A (restore backup lokal) atau Jalur B (*clean-room rebuild* langsung di `nafta121/helxmoblie`).
-- [ ] **0.2** Siapkan struktur repo Git (`main` + feature branches), `.gitignore` (Android/CMake/Gradle), skrip setup environment SDK 35 + NDK `27.2.12479018` + CMake `3.22.1` + truststore SSL proxy (`agy_cacerts.p12`).
-- [ ] **0.3** *(Jika Jalur B)* Rekonstruksi & verifikasi fondasi Tahap 4–14:
+- [x] **0.1** Konfirmasi Jalur A (restore backup lokal) atau Jalur B (*clean-room rebuild* langsung di `nafta121/helxmoblie`).
+- [x] **0.2** Siapkan struktur repo Git (`main` + feature branches), `.gitignore` (Android/CMake/Gradle), skrip setup environment SDK 35 + NDK `27.2.12479018` + CMake `3.22.1` + truststore SSL proxy (`agy_cacerts.p12`).
+- [x] **0.3** *(Jalur B)* Rekonstruksi & verifikasi fondasi Tahap 4–14:
   - `dsp_core` inti (`lockfree_spsc`, `polyphase_oversampler`, `biquad_anticramp`, `guitar_input_z`, `pot_tapers`, `oscillators_and_lfo`, `amp_precision_blocks`, `amp_recipe_bank` 30 ampli, `agoura_tube_amp`, `neural_clone_engine`, `dual_cab_convolver` 2048-tap + 12 mics, `drive_fuzz_kernel` 12 pedal, `dynamics_gate_comp`, `wah_parametric_eq` 8 wah, `modulation_bank` 10 mod, `pitch_synth_kernel` 5 pitch, `tape_bbd_delay` 7 delay, `dynamic_fdn_reverb` 7 reverb, `neural_json_loader`, `signal_chain_processor`).
   - Lapisan Android NDK/JNI Oboe (`OboeGuitarEngine`, `NativeDspBridge`) + `ExternalRigFileImporter` + `FxModelCatalog`.
-  - Lulus **Gate 1 (Test 1–15)**, **Gate 2 (MNA Check 1–8)**, dan **Gate 3 (JUnit + APK Debug)**, lalu **commit & push ke GitHub**.
+  - Lulus **Gate 1 (Test 1–18)**, **Gate 2 (MNA Check 1–8)**, dan **Gate 3 (JUnit + APK Debug multi-ABI)**, lalu **commit & push ke GitHub**.
 
 ### Fase 1 — Paket Fondasi 1: Mesin DSP Pelengkap & Telemetri (`GAP-01..04`, `06`, `07`, `10`, `11`, `22` Looper)
-- [ ] **GAP-01 (`P0`)** Dynamic Block Slot Routing + `SplitBlock` (`Split Y`, `Split A/B`, `Crossover LR2`) + `MergeMixerBlock` (`Level/Pan/Phase Invert B`) untuk paralel `Path 1A / 1B`.
-- [ ] **GAP-02 (`P0`)** `input_trim_db`, `output_level_db` (`-120..+18 dB`), `output_pan`, & `SetMasterMute(bool)` (`5 ms` *raised-cosine ramp*).
-- [ ] **GAP-03 (`P1`)** Telemetri stereo terpisah `in_peak_dbfs`, `out_peak_L_dbfs`, `out_peak_R_dbfs` + indikator *clip latch* (`>= -0,1 dBFS`).
-- [ ] **GAP-04 (`P1`)** `VolumePanBlock` (`Linear` / `Logarithmic Taper`, `0..100%`, `Stereo Width`).
-- [ ] **GAP-06 (`P0`)** Getter & ekspor telemetri `gate_gr_db` + `comp_gr_db` (`0..42 dB`) pada `60 Hz`.
-- [ ] **GAP-07 (`P1`)** Mode `10-Band Graphic EQ` & `Tilt EQ`, evaluasi kurva respons `128-titik` (`20 Hz–20 kHz`), serta ekstraktor spektrum magnitudo FFT IR.
-- [ ] **GAP-10 (`P0`)** `ChromaticTuner` (YIN diferensial + parabolik, `±0,1 cent`, `30–1.200 Hz`, ref `425–455 Hz`, fase strobe, *String Offsets*, opsi output `Muted` vs `Processed`).
-- [ ] **GAP-11 (`P0`)** `TempoClock` (`40–240 BPM`, *outlier-filtered* 4-tap `TAP Tempo`, subdivisi `1/4`, `1/8D`, `1/8`, `1/8T`, `1/16` untuk Delay/Mod/Filter).
-- [ ] **GAP-22a (`P2`)** `StereoLooperBlock` (`30–60 s` *circular buffer*, *crossfade splice* bebas klik, `Rec/Play/Overdub/Stop/Undo`).
-- [ ] **Verifikasi Fase 1:** Lulus **Test 16 & 17** + commit & push.
+- [x] **GAP-01 (`P0`)** Dynamic Block Slot Routing + `SplitBlock` (`Split Y`, `Split A/B`, `Crossover LR4`) + `MergeMixerBlock` (`Level/Pan/Phase Invert B`) untuk paralel `Path 1A / 1B`.
+- [x] **GAP-02 (`P0`)** `input_trim_db`, `output_level_db` (`-120..+18 dB`), `output_pan`, & `SetMasterMute(bool)` (`5 ms` *raised-cosine ramp*).
+- [x] **GAP-03 (`P1`)** Telemetri stereo terpisah `in_peak_dbfs`, `out_peak_L_dbfs`, `out_peak_R_dbfs` + indikator *clip latch* (`>= -0,1 dBFS`).
+- [x] **GAP-04 (`P1`)** `VolumePanBlock` (`Linear` / `Logarithmic Taper`, `0..100%`, `Stereo Width`).
+- [x] **GAP-06 (`P0`)** Getter & ekspor telemetri `gate_gr_db` + `comp_gr_db` (`0..42 dB`) pada `60 Hz`.
+- [x] **GAP-07 (`P1`)** Mode `10-Band Graphic EQ` & `Tilt EQ`, evaluasi kurva respons `128-titik` (`20 Hz–20 kHz`), serta ekstraktor spektrum magnitudo FFT IR.
+- [x] **GAP-10 (`P0`)** `ChromaticTuner` (YIN diferensial + parabolik, `±0,1 cent`, `30–1.200 Hz`, ref `425–455 Hz`, fase strobe, *String Offsets*, opsi output `Muted` vs `Processed`).
+- [x] **GAP-11 (`P0`)** `TempoClock` (`40–240 BPM`, *outlier-filtered* 4-tap `TAP Tempo`, subdivisi `1/4`, `1/8D`, `1/8`, `1/8T`, `1/16` untuk Delay/Mod/Filter).
+- [x] **GAP-22a (`P2`)** `StereoLooperBlock` (`30 s` *circular buffer*, *crossfade splice* bebas klik, `Rec/Play/Overdub/Stop/Undo`).
+- [x] **Verifikasi Fase 1:** Lulus **Test 16 & 17** + commit & push.
 
 ### Fase 2 — Paket Fondasi 2: *Preset Clip*, *Factory Cabs*, Katalog Skema, & Metadata Clone (`GAP-08`, `09`, `12`, `13`, `18`)
-- [ ] **GAP-08 (`P1`)** Sambungkan `low_cut_hz` & `high_cut_hz` di `kSetCloneParam` + ekstraksi penuh `CloneMetadata` (`brand`, `product`, `notes`, `uuid`, `input_level_dbu`) ke Kotlin.
-- [ ] **GAP-09 (`P1`)** **12 Model Factory Guitar & Bass Cabs** (`8x10 SVT`, `1x15 B-15`, `4x12 V30`, `4x12 Greenback`, `2x12 Blue Bell`, `1x12 Deluxe`, `1x8 Tweed`, dll.) + peta `defaultMatchedCab` + logika `Amp > Cab Link` & `Cab > Cab Link`.
-- [ ] **GAP-12 (`P1`)** `DryClipAuditionPlayer` di `OboeGuitarEngine` (multi-gaya riff DI: Clean, Crunch, Metal, Bass + impor WAV DI pengguna, `playhead_pos`, `Seek`, `±5s`, `Repeat`, `Auto Start/Stop`).
-- [ ] **GAP-13 (`P2`)** Flag `isStereoMode` (`Mono ↔ Stereo` toggle dengan pertahanan parameter + deteksi penyempitan jalur stereo).
-- [ ] **GAP-18 (`P1`)** `AmpModelCatalog.kt` & `ParameterSchemaRegistry.kt` terpusat (`Agoura` vs `HX`, `Guitar` vs `Bass`, `*Based On`, rentang/unit/deskripsi parameter untuk *Deep-Edit Popover*).
-- [ ] **Verifikasi Fase 2:** Lulus **Test 18** + JUnit katalog + commit & push.
+- [x] **GAP-08 (`P1`)** Sambungkan `low_cut_hz` & `high_cut_hz` di `kSetCloneParam` + ekstraksi penuh `CloneMetadata` (`brand`, `product`, `notes`, `uuid`, `input_level_dbu`) ke Kotlin.
+- [x] **GAP-09 (`P1`)** **12 Model Factory Guitar & Bass Cabs** (`8x10 SVT`, `1x15 B-15`, `4x12 V30`, `4x12 Greenback`, `2x12 Blue Bell`, `1x12 Deluxe`, `1x8 Tweed`, dll.) + peta `defaultMatchedCab` + logika `Amp > Cab Link` & `Cab > Cab Link`.
+- [x] **GAP-12 (`P1`)** `DryClipAuditionPlayer` (multi-gaya riff DI: Clean, Crunch, Metal, Bass + impor WAV DI pengguna, `playhead_pos`, `Seek`, `±5s`, `Repeat`, `Auto Start/Stop`).
+- [x] **GAP-13 (`P2`)** Flag `isStereoMode` (`Mono ↔ Stereo` toggle dengan pertahanan parameter + deteksi penyempitan jalur stereo).
+- [x] **GAP-18 (`P1`)** `AmpModelCatalog.kt` & `ParameterSchemaRegistry.kt` terpusat (`Agoura` vs `HX`, `Guitar` vs `Bass`, `*Based On`, rentang/unit/deskripsi parameter untuk *Deep-Edit Popover*).
+- [x] **Verifikasi Fase 2:** Lulus **Test 18** + JUnit katalog + commit & push.
 
 ### Fase 3 — Paket Fondasi 3: *Presets*, *Setlists*, *8 Snapshots Spillover*, *5-Zone Focus Bank*, & *History* (`GAP-05`, `14..17`)
-- [ ] **GAP-05 (`P0`)** `FocusZoneBank` (peta 5-zona otentik untuk ke-30 Ampli + seluruh kategori FX) + `FocusZoneInterpolator` dua-arah (`XY <-> Sliders`) + `Manage Zones` (`Rename/Copy/Paste/Reset`).
-- [ ] **GAP-14 (`P0`)** `SnapshotManager` (`8 Snapshots` per preset, *zero-gap spillover trails* tanpa `ResetAll()`, sakelar `Snapshot Control` per parameter, `Snapshots Set Bypass`, mode kamera putih `Auto-Remember` vs merah `Discard Edits`).
-- [ ] **GAP-15 (`P0`)** `PresetRepository` JSON (`FACTORY` read-only kurasi siap manggung + `USER` editable + `Setlists` + pencarian global *Based On* & `Preset Info` + impor/ekspor via SAF).
-- [ ] **GAP-16 (`P1`)** `BlockFavoritesStore` & `ModelUserDefaultsStore` (`User Default` / `Factory Default`).
-- [ ] **GAP-17 (`P1`)** `RigHistoryManager` (`Undo/Redo` 50 langkah berbasis *immutable state diff*) + `A/B Compare` (`Copy A -> B`).
-- [ ] **Verifikasi Fase 3:** Suite JUnit `SnapshotAndFocusEngineTest` + C++ spillover test + commit & push.
+- [x] **GAP-05 (`P0`)** `FocusZoneBank` (peta 5-zona otentik untuk ke-30 Ampli + seluruh kategori FX) + `FocusZoneInterpolator` dua-arah (`XY <-> Sliders`) + `Manage Zones` (`Rename/Copy/Paste/Reset`).
+- [x] **GAP-14 (`P0`)** `SnapshotManager` (`8 Snapshots` per preset, *zero-gap spillover trails* tanpa `ResetAll()`, sakelar `Snapshot Control` per parameter, `Snapshots Set Bypass`, mode kamera putih `Auto-Remember` vs merah `Discard Edits`).
+- [x] **GAP-15 (`P0`)** `PresetRepository` JSON (`FACTORY` read-only kurasi siap manggung + `USER` editable + `Setlists` + pencarian global *Based On* & `Preset Info` + impor/ekspor via SAF).
+- [x] **GAP-16 (`P1`)** `BlockFavoritesStore` & `ModelUserDefaultsStore` (`User Default` / `Factory Default`).
+- [x] **GAP-17 (`P1`)** `RigHistoryManager` (`Undo/Redo` 50 langkah berbasis *immutable state diff*) + `A/B Compare` (`Copy A -> B`).
+- [x] **Verifikasi Fase 3:** Suite JUnit `SnapshotAndFocusEngineTest` + C++ spillover test + commit & push.
 
 ### Fase 4 — Paket Fondasi 4: Infrastruktur *LIVE*, `EXP 1/2`, USB/BLE MIDI, & *Audio Foreground Service* (`GAP-19..23`)
-- [ ] **GAP-19 (`P0`)** `LiveFootswitchMatrix` (6 mode `Home > Play`, `MULTIPLE (X)`, *Custom Scribble Strip*, warna LED, `Snapshot Reselect`, `Stage Lock`).
-- [ ] **GAP-20 (`P0`)** `ControllerAssignmentEngine` (`EXP 1/2` multi-parameter dalam rentang `[Min..Max]` termasuk inversi + **`Auto-Engage`** `engage 3%`, `off-delay 200 ms`).
-- [ ] **GAP-21 (`P1`)** `StadiumMidiService` (`android.media.midi.MidiManager` USB & BLE-MIDI, dekoder `CC#69 / CC#49–56 / CC#1-2 / CC#64 / CC#68 / PC`, deklarasi `android.software.midi`, & **`MIDI Learn`**).
-- [ ] **GAP-22b (`P2`)** `ShowcaseTrackPlayer` (pemutar *backing track* + *Automated Snapshot Cue Flags* + *Gig Stopwatch*).
-- [ ] **GAP-23 (`P0`)** `StadiumAudioForegroundService` (`microphone|mediaPlayback`) + singleton controller untuk **rotasi `0 ms` tanpa putus suara**, `FLAG_KEEP_SCREEN_ON`, hapus `android:configChanges`, serta API `Audio/DSP Settings` (pemilihan device I/O, `1x/2x/4x Burst`, kalibrasi `dBu`, & `DSP Compatibility %`).
-- [ ] **Verifikasi Fase 4:** Suite JUnit `StadiumMidiParserTest` + uji rotasi `0 ms` + commit & push.
+- [x] **GAP-19 (`P0`)** `LiveFootswitchMatrix` (6 mode `Home > Play`, `MULTIPLE (X)`, *Custom Scribble Strip*, warna LED, `Snapshot Reselect`, `Stage Lock`).
+- [x] **GAP-20 (`P0`)** `ControllerAssignmentEngine` (`EXP 1/2` multi-parameter dalam rentang `[Min..Max]` termasuk inversi + **`Auto-Engage`** `engage 3%`, `off-delay 200 ms`).
+- [x] **GAP-21 (`P1`)** `StadiumMidiService` (`android.media.midi.MidiManager` USB & BLE-MIDI, dekoder `CC#69 / CC#49–56 / CC#1-2 / CC#64 / CC#68 / PC`, deklarasi `android.software.midi`, & **`MIDI Learn`**).
+- [x] **GAP-22b (`P2`)** `ShowcaseTrackPlayer` (pemutar *backing track* + *Automated Snapshot Cue Flags* + *Gig Stopwatch*).
+- [x] **GAP-23 (`P0`)** `StadiumAudioForegroundService` (`microphone|mediaPlayback`) + singleton controller untuk **rotasi `0 ms` tanpa putus suara**, `FLAG_KEEP_SCREEN_ON`, tanpa `android:configChanges`, serta API `Audio/DSP Settings` (pemilihan device I/O, `1x/2x/4x Burst`, kalibrasi `dBu`, & `DSP Compatibility %`).
+- [x] **Verifikasi Fase 4:** Suite JUnit `StadiumMidiParserTest` + `ControllerAndFootswitchTest` + commit & push.
 
 ### Fase 5 — Pembangunan UI/UX Modular Jetpack Compose (Tasks 1–6 dari `rencana_ui_ux_helix_stadium_mobile.md`)
-- [ ] **5.1** Dependensi `material3-adaptive`, `material3-adaptive-navigation-suite`, `navigation3`, `kotlinx-serialization-json` + `StadiumRigViewModel` tahan-rotasi.
-- [ ] **5.2** `StadiumDesignTokens.kt`, `StadiumTopInstanceBar.kt`, & `SignalFlowCanvas.kt` (`SignalFlowRoutingLogicTest`).
-- [ ] **5.3** `PolymorphicFocusView.kt` (5 varian penuh) & `ModelBrowserAndInspector.kt` (`Value-Bar Sliders` + ekspansi lebar penuh + `Deep-Edit Popover` + `CabMicAndEqMappingTest`).
-- [ ] **5.4** `LivePlayScreen.kt` (`PointerEventPass.Initial` + *Quick-Focus Header Strip* + *EXP Ribbon*) & `StageTunerOverlay.kt`.
-- [ ] **5.5** Perakitan 5-Postur Adaptif di `StadiumRigScreen.kt` & `MainActivity.kt` (`NavigationSuiteScaffold`, Navigation 3 `SceneStrategy`, `Posture.Tabletop` via `windowToLocal`, audit `rememberSaveable`) + `StadiumFormFactorPreviews.kt`.
-- [ ] **5.6** Verifikasi menyeluruh Gate 1–4 pada emulator (`adb shell wm size` simulasi Phone/Tablet Portrait & Landscape + rotasi live saat audio menyala) + rilis APK & commit/push!
+- [x] **5.1** Dependensi `material3-adaptive`, `material3-adaptive-navigation-suite`, `kotlinx-serialization-json` + `StadiumRigViewModel` tahan-rotasi (`StadiumRigViewModelTest`).
+- [x] **5.2** `StadiumDesignTokens.kt`, `StadiumTopInstanceBar.kt`, & `SignalFlowCanvas.kt` (`SignalFlowRoutingLogicTest`).
+- [x] **5.3** `PolymorphicFocusView.kt` (5 varian penuh) & `ModelBrowserAndInspector.kt` (`Value-Bar Sliders` + ekspansi lebar penuh + `Deep-Edit Popover` + `CabMicAndEqMappingTest`).
+- [x] **5.4** `LivePlayScreen.kt` (`PointerEventPass.Initial` + *Quick-Focus Header Strip* + *EXP Ribbon*) & `StageTunerOverlay.kt`.
+- [x] **5.5** Perakitan 5-Postur Adaptif di `StadiumRigScreen.kt` & `MainActivity.kt` (`NavigationSuiteScaffold`, `Posture.Tabletop` via `windowToLocal`, audit `rememberSaveable`) + `StadiumFormFactorPreviews.kt`.
+- [ ] **5.6** *(Gate 4 — Perangkat Fisik / Emulator Android)* Uji runtime `adb install -r app/build/outputs/apk/debug/app-debug.apk`, `adb shell wm size` simulasi Phone/Tablet Portrait & Landscape, dan uji rotasi live saat audio menyala.
 
 ---
 
