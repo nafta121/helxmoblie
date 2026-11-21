@@ -28,9 +28,8 @@ import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.CameraAlt
-import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.Search
+import com.cleanroom.stadiumdsp.ui.theme.StadiumIcons
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -232,7 +231,7 @@ fun ModelBrowserPane(
                     .padding(horizontal = 8.dp, vertical = 6.dp),
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Icon(Icons.Rounded.FolderOpen, contentDescription = "Import .nam/.aidax/.wav", tint = StadiumColors.CabPink, modifier = Modifier.size(14.dp))
+                    Icon(StadiumIcons.FolderOpen, contentDescription = "Import .nam/.aidax/.wav", tint = StadiumColors.CabPink, modifier = Modifier.size(14.dp))
                     Text("SAF", style = MaterialTheme.typography.labelSmall, color = Color.White)
                 }
             }
@@ -574,7 +573,7 @@ private fun ValueBarSliderCard(
             ) {
                 if (isSnapshotControlled) {
                     Icon(
-                        imageVector = Icons.Rounded.CameraAlt,
+                        imageVector = StadiumIcons.Camera,
                         contentDescription = "Snapshot Controlled",
                         tint = Color.White,
                         modifier = Modifier.size(12.dp),

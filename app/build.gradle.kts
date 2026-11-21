@@ -89,7 +89,7 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.material3:material3")
-    implementation("androidx.compose.material:material-icons-extended")
+    implementation("androidx.compose.material:material-icons-core")
 
     // Material 3 Adaptive + Navigation Suite + Window Size Class / Foldable Posture
     implementation("androidx.compose.material3:material3-adaptive-navigation-suite:1.3.1")

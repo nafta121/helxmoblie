@@ -36,6 +36,7 @@ object OboeSessionController {
 
     val isRunning: Boolean get() = bridge.isAudioRunning()
 
+    @Synchronized
     fun ensureStarted(context: Context, settings: AudioDspSettings = currentSettings): Boolean {
         currentSettings = settings
         if (bridge.isAudioRunning()) return true
@@ -51,6 +52,7 @@ object OboeSessionController {
         return ok
     }
 
+    @Synchronized
     fun restartWithSettings(context: Context, settings: AudioDspSettings): Boolean {
         currentSettings = settings
         bridge.stopAudio()
@@ -66,6 +68,7 @@ object OboeSessionController {
         return ok
     }
 
+    @Synchronized
     fun stopAll(context: Context) {
         bridge.stopAudio()
         StadiumAudioForegroundService.stop(context)

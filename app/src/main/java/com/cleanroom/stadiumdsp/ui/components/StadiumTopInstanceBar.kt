@@ -20,18 +20,12 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.rounded.Redo
-import androidx.compose.material.icons.automirrored.rounded.Undo
-import androidx.compose.material.icons.automirrored.rounded.VolumeOff
-import androidx.compose.material.icons.automirrored.rounded.VolumeUp
-import androidx.compose.material.icons.rounded.CameraAlt
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.KeyboardArrowUp
 import androidx.compose.material.icons.rounded.Lock
-import androidx.compose.material.icons.rounded.LockOpen
-import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Settings
+import com.cleanroom.stadiumdsp.ui.theme.StadiumIcons
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -129,7 +123,7 @@ fun StadiumTopInstanceBar(
                     }
                     Box(Modifier.width(1.dp).height(14.dp).background(StadiumColors.BorderSubtle))
                     Icon(
-                        imageVector = Icons.AutoMirrored.Rounded.Undo,
+                        imageVector = StadiumIcons.Undo,
                         contentDescription = "Undo",
                         tint = if (state.canUndo) StadiumColors.TextPrimary else StadiumColors.TextMuted.copy(alpha = 0.4f),
                         modifier = Modifier
@@ -138,7 +132,7 @@ fun StadiumTopInstanceBar(
                             .padding(2.dp),
                     )
                     Icon(
-                        imageVector = Icons.AutoMirrored.Rounded.Redo,
+                        imageVector = StadiumIcons.Redo,
                         contentDescription = "Redo",
                         tint = if (state.canRedo) StadiumColors.TextPrimary else StadiumColors.TextMuted.copy(alpha = 0.4f),
                         modifier = Modifier
@@ -223,7 +217,7 @@ fun StadiumTopInstanceBar(
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
                     Icon(
-                        imageVector = Icons.Rounded.CameraAlt,
+                        imageVector = StadiumIcons.Camera,
                         contentDescription = "Snapshot Camera Mode",
                         tint = if (state.snapshotDiscardEdits) StadiumColors.AmpRed else Color.White,
                         modifier = Modifier.size(14.dp),
@@ -251,7 +245,7 @@ fun StadiumTopInstanceBar(
                     horizontalArrangement = Arrangement.spacedBy(3.dp),
                 ) {
                     Icon(
-                        imageVector = if (state.isPresetClipPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                        imageVector = if (state.isPresetClipPlaying) StadiumIcons.Pause else Icons.Rounded.PlayArrow,
                         contentDescription = "Preset Clip Audition",
                         tint = if (state.isPresetClipPlaying) StadiumColors.DelayEmerald else StadiumColors.TextSecondary,
                         modifier = Modifier.size(15.dp),
@@ -314,7 +308,7 @@ fun StadiumTopInstanceBar(
                     horizontalArrangement = Arrangement.spacedBy(3.dp),
                 ) {
                     Icon(
-                        imageVector = if (state.stageLock) Icons.Rounded.Lock else Icons.Rounded.LockOpen,
+                        imageVector = if (state.stageLock) Icons.Rounded.Lock else StadiumIcons.LockOpen,
                         contentDescription = "Stage Lock",
                         tint = if (state.stageLock) StadiumColors.DistortionAmber else StadiumColors.TextSecondary,
                         modifier = Modifier.size(14.dp),
@@ -357,7 +351,7 @@ fun StadiumTopInstanceBar(
                     horizontalArrangement = Arrangement.spacedBy(3.dp),
                 ) {
                     Icon(
-                        imageVector = if (state.isMasterMuted) Icons.AutoMirrored.Rounded.VolumeOff else Icons.AutoMirrored.Rounded.VolumeUp,
+                        imageVector = if (state.isMasterMuted) StadiumIcons.VolumeOff else StadiumIcons.VolumeUp,
                         contentDescription = "Master Mute All",
                         tint = if (state.isMasterMuted) Color.White else Color(0xFFFF7A7A),
                         modifier = Modifier.size(14.dp),
@@ -420,7 +414,7 @@ fun StadiumTopInstanceBar(
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
                     Icon(
-                        imageVector = Icons.Rounded.CameraAlt,
+                        imageVector = StadiumIcons.Camera,
                         contentDescription = null,
                         tint = if (state.snapshotDiscardEdits) StadiumColors.AmpRed else Color.White,
                         modifier = Modifier.size(12.dp),

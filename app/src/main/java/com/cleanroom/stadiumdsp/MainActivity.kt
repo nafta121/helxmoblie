@@ -16,6 +16,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.cleanroom.stadiumdsp.audio.AudioDspSettings
@@ -57,7 +58,9 @@ class MainActivity : ComponentActivity() {
                     contract = ActivityResultContracts.RequestPermission(),
                 ) { granted ->
                     val settings = rigViewModel.uiState.value.audioSettings.copy(enableMicrophoneInput = granted)
-                    rigViewModel.startAudioEngine(applicationContext, settings)
+                    lifecycleScope.launch(Dispatchers.IO) {
+                        rigViewModel.startAudioEngine(applicationContext, settings)
+                    }
                 }
 
                 // SAF Document Picker for .nam, .aidax, and .wav IR files
@@ -84,14 +87,18 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                // Start Oboe audio engine cleanly (idempotent across Activity recreation!)
+                // Start Oboe audio engine AFTER the first Compose frame commits so the main Looper
+                // is guaranteed responsive for StadiumAudioForegroundService.startForeground() (0 ANR).
                 LaunchedEffect(Unit) {
+                    withFrameNanos { }
                     val hasMic = ContextCompat.checkSelfPermission(
                         this@MainActivity,
                         Manifest.permission.RECORD_AUDIO,
                     ) == PackageManager.PERMISSION_GRANTED
                     if (hasMic) {
-                        rigViewModel.startAudioEngine(applicationContext)
+                        withContext(Dispatchers.IO) {
+                            rigViewModel.startAudioEngine(applicationContext)
+                        }
                     } else {
                         audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                     }
@@ -133,10 +140,14 @@ class MainActivity : ComponentActivity() {
                         ExternalRigFileImporter.launchSafDocumentPicker(safPickerLauncher) { /* handled in status */ }
                     },
                     onApplyAudioSettings = { newSettings: AudioDspSettings ->
-                        rigViewModel.restartAudioWithSettings(applicationContext, newSettings)
+                        lifecycleScope.launch(Dispatchers.IO) {
+                            rigViewModel.restartAudioWithSettings(applicationContext, newSettings)
+                        }
                     },
                     onStartAudio = {
-                        rigViewModel.startAudioEngine(applicationContext)
+                        lifecycleScope.launch(Dispatchers.IO) {
+                            rigViewModel.startAudioEngine(applicationContext)
+                        }
                     },
                     onDestinationChanged = { currentDest = it },
                 )

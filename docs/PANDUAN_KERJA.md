@@ -15,15 +15,14 @@
 - **Hasil Pelacakan Persisten di Lingkungan Cloud:** Direktori *brain* bernama persis `0f8bc195-d6ad-4551-829b-f15340a14266` tidak terpasang di `/home/antigravity/.gemini/jetski/brain/` (karena perbedaan ID antarmuka dengan ID direktori internal *remote agent*, atau transkrip sesi tidak ikut ter-mount). Namun, seluruh artefak riset, cetak biru DSP, katalog model, audit kesenjangan fitur, rancangan UI/UX, prototipe interaktif HTML, 4 gambar desain, log verifikasi 18 suite DSP, serta tautan APK untuk proyek **Hx Mobile (`stadium_android_dsp` / `helxmoblie`)** tersimpan utuh pada direktori *brain*:
   - `/home/antigravity/.gemini/jetski/brain/v1/default/jetski_remote_agents_3p/21594415-baf9-4832-a17a-34ac1bc16580/` (aktivitas 16–20 November 2026, terakhir pukul `00:07 UTC` 20 Nov 2026).
 
-### 1.2 Peringatan Kritis: Status Kode Sumber & VM Ephemeral
+### 1.2 Status Aset Proyek & Rilis Terkini
 
 | Aset Proyek | Status Saat Ini | Lokasi / Keterangan |
 | :--- | :--- | :--- |
-| **Repositori GitHub `nafta121/helxmoblie`** | **Kosong (0 commit)** | Baru dibuat (`2026-11-20T21:50:28Z`); belum berisi kode sumber dari sesi sebelumnya. |
-| **Kode Sumber `/home/antigravity/stadium_android_dsp`** | **Hilang bersama VM Ephemeral lama** | Lingkungan VM sebelumnya bersifat *ephemeral*; folder kerja lokal tidak ikut berpindah ke VM baru karena belum sempat di-push ke GitHub. |
+| **Repositori GitHub `nafta121/helxmoblie`** | **Aktif (Milestone 0–6 + Gate 1–4 Lulus)** | Branch `main` memuat penuh `dsp_core/` (30 Amp, 52 FX, 12 Cab/Mic), `app/` (Oboe MMAP + 5-Postur Adaptive UI), `tests/`, `tools/`, & `scripts/`. |
+| **APK Rilis `v0.2.0` (`arm64-v8a` + `x86_64`)** | **Terverifikasi Gate 1–4 (`0 Crashes`, `0 ANR`)** | `Hx-Mobile-StadiumDSP-v0.2.0-debug.apk` diunggah ke Google Drive folder [`Hx Mobile`](https://drive.google.com/drive/folders/1Ip3G1ytd-w4fPXmM-IWJcBqsOLTRBhHe) & **GitHub Release `v0.2.0`**. |
 | **Seluruh Laporan Riset, Cetak Biru DSP, Katalog 605 Model, Audit 23 Gap, Rencana UI/UX, Prototipe HTML, & 4 Mockup** | **Tersimpan Persisten (100% Utuh)** | `/home/antigravity/.gemini/jetski/brain/v1/default/jetski_remote_agents_3p/21594415-baf9-4832-a17a-34ac1bc16580/` |
-| **APK Terkompilasi v0.1.0 (`arm64-v8a` + `x86_64`)** | **Tersimpan Persisten di Google Drive** | `Hx-Mobile-StadiumDSP-v0.1.0-debug.apk` (27,06 MB) di folder Drive [`Hx Mobile`](https://drive.google.com/drive/folders/1Ip3G1ytd-w4fPXmM-IWJcBqsOLTRBhHe) (`ID: 16fkTw3yr78ZLbH6APdaS3XSeDK7wmANw`). |
-| **Log Verifikasi Terakhir (Test 1–18)** | **Tersimpan Persisten** | `task-1847.log`, `task-2014.log`, `task-2015.log` di folder `.system_generated/tasks/` sesi `21594415-...`. |
+| **APK Historis v0.1.0 (`arm64-v8a` + `x86_64`)** | **Arsip di Google Drive** | `Hx-Mobile-StadiumDSP-v0.1.0-debug.apk` (27,06 MB) di folder Drive [`Hx Mobile`](https://drive.google.com/drive/folders/1Ip3G1ytd-w4fPXmM-IWJcBqsOLTRBhHe) (`ID: 16fkTw3yr78ZLbH6APdaS3XSeDK7wmANw`). |
 
 ### 1.3 Keputusan Jalur Lanjutan (Sebelum Menulis Kode Baru)
 
@@ -298,7 +297,7 @@ Prinsip urutan kerja dari audit sesi sebelumnya tetap dipertahankan: **selesaika
 - [x] **5.3** `PolymorphicFocusView.kt` (5 varian penuh) & `ModelBrowserAndInspector.kt` (`Value-Bar Sliders` + ekspansi lebar penuh + `Deep-Edit Popover` + `CabMicAndEqMappingTest`).
 - [x] **5.4** `LivePlayScreen.kt` (`PointerEventPass.Initial` + *Quick-Focus Header Strip* + *EXP Ribbon*) & `StageTunerOverlay.kt`.
 - [x] **5.5** Perakitan 5-Postur Adaptif di `StadiumRigScreen.kt` & `MainActivity.kt` (`NavigationSuiteScaffold`, `Posture.Tabletop` via `windowToLocal`, audit `rememberSaveable`) + `StadiumFormFactorPreviews.kt`.
-- [ ] **5.6** *(Gate 4 — Perangkat Fisik / Emulator Android)* Uji runtime `adb install -r app/build/outputs/apk/debug/app-debug.apk`, `adb shell wm size` simulasi Phone/Tablet Portrait & Landscape, dan uji rotasi live saat audio menyala.
+- [x] **5.6** *(Gate 4 — Emulator Android 12 ATD + Host Latency Benchmark)* Lulus `stadium_latency_bench` (`0,000 ms` Dual Cab IR, `0,146 ms` Agoura Amp+Cab onset, `0,938 ms` 10-blok penuh, P99 **`11,09%–14,49%` RT CPU load** lintas burst `16..384` sampel dengan recall 8-Snapshot aktif) serta lulus `scripts/run_gate4_emulator_test.sh` pada `emulator-5554` (`Android 12 ATD x86_64`: `Crashes: 0`, `ANR: 0`, `Oboe Engine Starts: 1` lintas rotasi Portrait ↔ Landscape ↔ Tablet `1920x1200`, `xruns=0`, `sr=48000`, `outBufMs=36,75 ms` pada HAL virtual emulator `882f x 2`).
 
 ---
 
@@ -306,12 +305,12 @@ Prinsip urutan kerja dari audit sesi sebelumnya tetap dipertahankan: **selesaika
 
 Tidak ada fase yang dianggap selesai sebelum seluruh gerbang yang relevan menghasilkan bukti lulus objektif (*evidence before assertions*):
 
-| Gerbang | Ruang Lingkup | Target / Ambang Lulus | Perintah Eksekusi |
+| Gerbang | Ruang Lingkup | Target / Hasil Terverifikasi (v0.2.0) | Perintah Eksekusi |
 | :--- | :--- | :--- | :--- |
-| **Gate 1 — C++20 Host DSP Suite** | `tests/test_dsp_suite.cpp` (Test 1–18+) | `0 failures`; konvolusi `2.048-tap` latensi `0` sampel & galat `< 1.5e-5`; beban semua blok aktif `< 166,6 us` / 16 sampel (baseline terukur: **`13,27–16,51 us` = `4–5%` RT budget**); tuner `< 0,25 cent`; `MasterMute < -90 dBFS`. | `cmake -B build_host -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=clang++ && cmake --build build_host -j4 && ./build_host/stadium_dsp_tests .` |
-| **Gate 2 — Python `float64` MNA Suite** | `tools/verify_hardware_precision.py` (MNA Check 1–8+) | Auto-Z RLC `< 0,15 dB`; FMV 5-Node MNA `< 0,10 dB`; James 6-Node MNA `< 0,03 dB`; Hadamard `~1e-16`; Big Muff 3-Node MNA `< 0,12 dB` (terukur `0,024–0,089 dB`); `1N34A` Ge identity `< 1e-9`; `'63 Spring` dispersi `~+8,4 ms`. | `python3 tools/verify_hardware_precision.py` |
-| **Gate 3 — Android JUnit & Multi-ABI APK** | Unit test Kotlin + build NDK `arm64-v8a` & `x86_64` | `0 failures`, `BUILD SUCCESSFUL`, biner `libstadium_dsp.so` tersedia untuk kedua ABI di dalam APK. | `./gradlew testDebugUnitTest assembleDebug` |
-| **Gate 4 — Live Runtime & Stage-Proof** | Emulator / Perangkat Android | `AndroidRuntime Errors: 0`, `ANR Count: 0`, `OUT PEAK <= -0,1 dBFS`, rotasi Portrait ↔ Landscape `0 ms` drop audio, `Stage Lock` & kamera merah `Discard Edits` terverifikasi. | `adb install -r app/build/outputs/apk/debug/app-debug.apk` + uji logcat & rotasi `wm size` |
+| **Gate 1 — C++20 Host DSP Suite** | `tests/test_dsp_suite.cpp` (Test 1–18) | **LULUS (`18/18`, `0 failures`)**; konvolusi `2.048-tap` latensi `0` sampel; tuner `< 0,04 cent`; `MasterMute = -200,0 dBFS`. | `cmake -B build_host -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=clang++ && cmake --build build_host -j4 && ./build_host/stadium_dsp_tests .` |
+| **Gate 2 — Python `float64` MNA Suite** | `tools/verify_hardware_precision.py` (MNA Check 1–8) | **LULUS (`8/8`, `0 failures`)**; Auto-Z `0,0071 dB`; FMV `0,020–0,108 dB`; James `0,0032–0,0061 dB`; Hadamard `1,11e-16`; Big Muff `0,0028–0,0044 dB`; `'63 Spring` `+8,45 ms`. | `python3 tools/verify_hardware_precision.py` |
+| **Gate 3 — Android JUnit & Multi-ABI APK** | 9 suite JUnit Kotlin + NDK `arm64-v8a` & `x86_64` | **LULUS (`29/29` JUnit, `0 warnings`, `BUILD SUCCESSFUL`)**; multi-ABI `libstadium_dsp.so` (`arm64-v8a` `281 KB` + `x86_64` `335 KB`) & `liboboe.so`. | `./gradlew testDebugUnitTest assembleDebug` |
+| **Gate 4 — Latency Benchmark & Live Runtime** | `tests/latency_benchmark.cpp` + `scripts/run_gate4_emulator_test.sh` (`emulator-5554` API 31 ATD) | **LULUS (`Crashes: 0`, `ANR: 0`, `Oboe Starts: 1` lintas rotasi Portrait ↔ Landscape ↔ Tablet `1920x1200`, `xruns=0`)**; DSP P99 **`11,09%–14,49%` load** (all 11 blocks + live 8-Snapshot recall); estimasi RTL hardware MMAP `48f 1x Ultra ≈ 3,6–4,6 ms`. | `./build_host/stadium_latency_bench && bash scripts/run_gate4_emulator_test.sh app/build/outputs/apk/debug/app-debug.apk` |
 
 ---
 

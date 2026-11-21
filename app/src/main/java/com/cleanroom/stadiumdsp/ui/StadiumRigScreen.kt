@@ -18,10 +18,8 @@ import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Edit
-import androidx.compose.material.icons.rounded.GraphicEq
-import androidx.compose.material.icons.rounded.LibraryMusic
 import androidx.compose.material.icons.rounded.PlayArrow
-import androidx.compose.material.icons.rounded.Tune
+import com.cleanroom.stadiumdsp.ui.theme.StadiumIcons
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -221,10 +219,10 @@ fun StadiumRigAdaptiveContent(
             WorkspaceDestination.entries.forEach { dest ->
                 val icon = when (dest) {
                     WorkspaceDestination.EDIT -> Icons.Rounded.Edit
-                    WorkspaceDestination.FOCUS -> Icons.Rounded.GraphicEq
+                    WorkspaceDestination.FOCUS -> StadiumIcons.FocusEq
                     WorkspaceDestination.LIVE_PLAY -> Icons.Rounded.PlayArrow
-                    WorkspaceDestination.PRESETS -> Icons.Rounded.LibraryMusic
-                    WorkspaceDestination.TUNER -> Icons.Rounded.Tune
+                    WorkspaceDestination.PRESETS -> StadiumIcons.Presets
+                    WorkspaceDestination.TUNER -> StadiumIcons.Tuner
                 }
                 item(
                     selected = destination == dest,

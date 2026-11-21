@@ -137,6 +137,7 @@ class StadiumRigViewModel(
     private val telemetryScratch = FloatArray(16)
     private val eqScratch = FloatArray(64)
     private val cabSpectrumScratch = FloatArray(64)
+    private var telemetryPollCounter = 0
 
     private val _telemetry = MutableStateFlow(LiveTelemetryUi())
     val telemetry: StateFlow<LiveTelemetryUi> = _telemetry.asStateFlow()
@@ -160,6 +161,22 @@ class StadiumRigViewModel(
     fun pollTelemetryFrame() {
         val snap = bridge.readTelemetry(telemetryScratch)
         _telemetry.value = snap
+        telemetryPollCounter++
+        if (telemetryPollCounter % 120 == 1) {
+            val diag = bridge.getStreamDiagnostics()
+            _uiState.update { it.copy(streamDiagnostics = diag, isAudioRunning = bridge.isAudioRunning()) }
+            runCatching {
+                android.util.Log.i(
+                    "StadiumGate4Telemetry",
+                    String.format(
+                        "running=%s sr=%d burst=%df buf=%df outBufMs=%.2f mmapExcl=%s xruns=%d rtCpu=%.2f%% inPeak=%.1fdB outL=%.1fdB outR=%.1fdB snap=%d",
+                        bridge.isAudioRunning(), diag.sampleRate, diag.framesPerBurst, diag.bufferSizeFrames,
+                        diag.roundTripLatencyMs, diag.isMmapUsed, diag.xRunCount, snap.rtCpuLoadPct,
+                        snap.inPeakDb, snap.outPeakLDb, snap.outPeakRDb, snap.activeSnapshot,
+                    ),
+                )
+            }
+        }
 
         if (gigStopwatch.isRunning || showcasePlayer.isPlaying) {
             val nowMs = System.currentTimeMillis()
@@ -180,6 +197,7 @@ class StadiumRigViewModel(
         OboeSessionController.bridge = bridge
         val ok = OboeSessionController.ensureStarted(context, settings)
         syncFullPresetToNative(_uiState.value.activePreset)
+        telemetryPollCounter = 0
         _uiState.update {
             it.copy(
                 audioSettings = settings,
@@ -194,6 +212,7 @@ class StadiumRigViewModel(
         OboeSessionController.bridge = bridge
         val ok = OboeSessionController.restartWithSettings(context, settings)
         syncFullPresetToNative(_uiState.value.activePreset)
+        telemetryPollCounter = 0
         _uiState.update {
             it.copy(
                 audioSettings = settings,
