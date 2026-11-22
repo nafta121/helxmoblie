@@ -70,9 +70,26 @@ data class StreamDiagnosticsUi(
     val bufferSizeFrames: Int = 384,
     val isMmapUsed: Boolean = false,
     val xRunCount: Int = 0,
+    val bufferCapacityFrames: Int = 768,
+    val inputFramesPerBurst: Int = 0,
+    val measuredLatencyUs: Int = -1,
 ) {
-    val roundTripLatencyMs: Float
+    val outputBufferMs: Float
         get() = if (sampleRate > 0) (bufferSizeFrames * 1000f) / sampleRate else 0f
+
+    val measuredLatencyMs: Float?
+        get() = if (measuredLatencyUs > 0) measuredLatencyUs / 1000f else null
+
+    /**
+     * Reports hardware AAudio timestamp latency when available, otherwise output + input buffer latency.
+     */
+    val roundTripLatencyMs: Float
+        get() {
+            measuredLatencyMs?.let { return it }
+            if (sampleRate <= 0) return 0f
+            val totalFrames = bufferSizeFrames + if (inputFramesPerBurst > 0) inputFramesPerBurst else 0
+            return (totalFrames * 1000f) / sampleRate
+        }
 }
 
 /**
@@ -132,9 +149,18 @@ data class LiveTelemetryUi(
  */
 interface DspBridgeGateway {
     val isNativeAvailable: Boolean
-    fun startAudio(enableInput: Boolean, inputDeviceId: Int = 0, outputDeviceId: Int = 0, burstMultiplier: Int = 2): Boolean
+    fun startAudio(
+        enableInput: Boolean,
+        inputDeviceId: Int = 0,
+        outputDeviceId: Int = 0,
+        burstMultiplier: Int = 2,
+        requestedBufferFrames: Int = 0,
+        autoXrunGuard: Boolean = true,
+    ): Boolean
     fun stopAudio()
     fun isAudioRunning(): Boolean
+    fun setLiveBufferSizeFrames(targetFrames: Int): Int
+    fun setAutoXrunGuard(enabled: Boolean)
     fun getStreamDiagnostics(): StreamDiagnosticsUi
     fun enqueueCommand(
         type: Int,
@@ -189,10 +215,14 @@ object NativeDspBridge : DspBridgeGateway {
         inputDeviceId: Int,
         outputDeviceId: Int,
         burstMultiplier: Int,
+        requestedBufferFrames: Int,
+        autoXrunGuard: Boolean,
     ): Boolean
     private external fun nativeStopAudio()
     private external fun nativeIsAudioRunning(): Boolean
-    private external fun nativeGetStreamDiagnostics(outInt5: IntArray)
+    private external fun nativeSetLiveBufferSizeFrames(targetFrames: Int): Int
+    private external fun nativeSetAutoXrunGuard(enabled: Boolean)
+    private external fun nativeGetStreamDiagnostics(outInt8: IntArray)
     private external fun nativeEnqueueCommand(
         type: Int,
         targetId: Int,
@@ -232,8 +262,17 @@ object NativeDspBridge : DspBridgeGateway {
         inputDeviceId: Int,
         outputDeviceId: Int,
         burstMultiplier: Int,
+        requestedBufferFrames: Int,
+        autoXrunGuard: Boolean,
     ): Boolean = if (isNativeAvailable) {
-        nativeStartAudio(enableInput, inputDeviceId, outputDeviceId, burstMultiplier)
+        nativeStartAudio(
+            enableInput,
+            inputDeviceId,
+            outputDeviceId,
+            burstMultiplier,
+            requestedBufferFrames,
+            autoXrunGuard,
+        )
     } else false
 
     override fun stopAudio() {
@@ -242,9 +281,16 @@ object NativeDspBridge : DspBridgeGateway {
 
     override fun isAudioRunning(): Boolean = if (isNativeAvailable) nativeIsAudioRunning() else false
 
+    override fun setLiveBufferSizeFrames(targetFrames: Int): Int =
+        if (isNativeAvailable) nativeSetLiveBufferSizeFrames(targetFrames) else targetFrames
+
+    override fun setAutoXrunGuard(enabled: Boolean) {
+        if (isNativeAvailable) nativeSetAutoXrunGuard(enabled)
+    }
+
     override fun getStreamDiagnostics(): StreamDiagnosticsUi {
         if (!isNativeAvailable) return StreamDiagnosticsUi()
-        val arr = IntArray(5)
+        val arr = IntArray(8)
         nativeGetStreamDiagnostics(arr)
         return StreamDiagnosticsUi(
             sampleRate = arr[0],
@@ -252,6 +298,9 @@ object NativeDspBridge : DspBridgeGateway {
             bufferSizeFrames = arr[2],
             isMmapUsed = arr[3] != 0,
             xRunCount = arr[4],
+            bufferCapacityFrames = arr[5].coerceAtLeast(arr[1]),
+            inputFramesPerBurst = arr[6],
+            measuredLatencyUs = arr[7],
         )
     }
 

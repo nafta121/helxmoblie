@@ -19,7 +19,10 @@ data class AudioDspSettings(
     val enableMicrophoneInput: Boolean = true,
     val inputDeviceId: Int = 0,
     val outputDeviceId: Int = 0,
-    val burstMultiplier: Int = 2, // 1x (Ultra-Low), 2x (Stage Safe), 4x (Compatibility)
+    val bufferSizeMode: BufferSizeMode = BufferSizeMode.HARDWARE_BURST,
+    val burstMultiplier: Int = 2, // 1x (Ultra-Low), 2x (Stage Safe), 3x, 4x (Safe), 6x, 8x
+    val requestedBufferFrames: Int = 0, // Used when bufferSizeMode == FIXED_FRAMES (0 = auto burst * mult)
+    val autoXrunGuard: Boolean = true,
     val interfaceMaxDbu: Float = 12.0f,
     val keepScreenAwakeInLive: Boolean = true,
 )
@@ -27,7 +30,8 @@ data class AudioDspSettings(
 /**
  * Process-scoped Singleton Audio Session Controller (GAP-23):
  * Keeps the C++20 Oboe AAudio MMAP stream alive across Activity configuration changes
- * (Portrait <-> Landscape rotation, foldable hinge changes) with 0 ms audio dropout!
+ * (Portrait <-> Landscape rotation, foldable hinge changes) with 0 ms audio dropout,
+ * and applies live buffer size edits without restarting the stream!
  */
 object OboeSessionController {
     var bridge: DspBridgeGateway = NativeDspBridge
@@ -35,6 +39,9 @@ object OboeSessionController {
         private set
 
     val isRunning: Boolean get() = bridge.isAudioRunning()
+
+    private fun effectiveRequestedFrames(settings: AudioDspSettings): Int =
+        if (settings.bufferSizeMode == BufferSizeMode.FIXED_FRAMES) settings.requestedBufferFrames else 0
 
     @Synchronized
     fun ensureStarted(context: Context, settings: AudioDspSettings = currentSettings): Boolean {
@@ -45,6 +52,8 @@ object OboeSessionController {
             inputDeviceId = settings.inputDeviceId,
             outputDeviceId = settings.outputDeviceId,
             burstMultiplier = settings.burstMultiplier,
+            requestedBufferFrames = effectiveRequestedFrames(settings),
+            autoXrunGuard = settings.autoXrunGuard,
         )
         if (ok) {
             StadiumAudioForegroundService.start(context)
@@ -52,15 +61,62 @@ object OboeSessionController {
         return ok
     }
 
+    /**
+     * Applies updated audio settings with zero-glitch live buffer tuning whenever stream topology
+     * (device IDs / mic input) did not change; restarts stream only when I/O route changed.
+     */
+    @Synchronized
+    fun applySettings(context: Context, settings: AudioDspSettings): Boolean {
+        val prev = currentSettings
+        AudioSettingsRepository.save(context, settings)
+        if (bridge.isAudioRunning() && !AudioBufferPlanner.needsStreamRestart(prev, settings)) {
+            currentSettings = settings
+            val diag = bridge.getStreamDiagnostics()
+            val target = AudioBufferPlanner.resolveTargetBufferFrames(
+                settings = settings,
+                framesPerBurst = diag.framesPerBurst,
+                bufferCapacityFrames = diag.bufferCapacityFrames,
+            )
+            bridge.setLiveBufferSizeFrames(target)
+            bridge.setAutoXrunGuard(settings.autoXrunGuard)
+            return true
+        }
+        return restartWithSettings(context, settings)
+    }
+
+    @Synchronized
+    fun setLiveBufferFrames(
+        context: Context,
+        targetFrames: Int,
+        mode: BufferSizeMode,
+        burstMultiplier: Int,
+    ): Int {
+        val updated = currentSettings.copy(
+            bufferSizeMode = mode,
+            burstMultiplier = burstMultiplier.coerceIn(1, 16),
+            requestedBufferFrames = if (mode == BufferSizeMode.FIXED_FRAMES) targetFrames.coerceAtLeast(16) else 0,
+        )
+        currentSettings = updated
+        AudioSettingsRepository.save(context, updated)
+        return if (bridge.isAudioRunning()) {
+            bridge.setLiveBufferSizeFrames(targetFrames)
+        } else {
+            targetFrames
+        }
+    }
+
     @Synchronized
     fun restartWithSettings(context: Context, settings: AudioDspSettings): Boolean {
         currentSettings = settings
+        AudioSettingsRepository.save(context, settings)
         bridge.stopAudio()
         val ok = bridge.startAudio(
             enableInput = settings.enableMicrophoneInput,
             inputDeviceId = settings.inputDeviceId,
             outputDeviceId = settings.outputDeviceId,
             burstMultiplier = settings.burstMultiplier,
+            requestedBufferFrames = effectiveRequestedFrames(settings),
+            autoXrunGuard = settings.autoXrunGuard,
         )
         if (ok) {
             StadiumAudioForegroundService.start(context)
@@ -89,13 +145,22 @@ object OboeSessionController {
  */
 class StadiumAudioForegroundService : Service() {
 
+    override fun onCreate() {
+        super.onCreate()
+        promoteToForeground()
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             return START_NOT_STICKY
         }
+        promoteToForeground()
+        return START_STICKY
+    }
 
+    private fun promoteToForeground() {
         ensureNotificationChannel()
         val notification = buildNotification()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -115,7 +180,6 @@ class StadiumAudioForegroundService : Service() {
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
-        return START_STICKY
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -145,7 +209,11 @@ class StadiumAudioForegroundService : Service() {
 
         fun start(context: Context) {
             val intent = Intent(context, StadiumAudioForegroundService::class.java)
-            runCatching { ContextCompat.startForegroundService(context, intent) }
+            // Prefer startService() while Activity is foregrounded (promotes via startForeground()
+            // in onCreate/onStartCommand without arming Android 12+ cold-start FGS timeout crashes).
+            runCatching { context.startService(intent) }.onFailure {
+                runCatching { ContextCompat.startForegroundService(context, intent) }
+            }
         }
 
         fun stop(context: Context) {

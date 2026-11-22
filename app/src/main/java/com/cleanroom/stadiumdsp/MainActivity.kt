@@ -91,13 +91,16 @@ class MainActivity : ComponentActivity() {
                 // is guaranteed responsive for StadiumAudioForegroundService.startForeground() (0 ANR).
                 LaunchedEffect(Unit) {
                     withFrameNanos { }
+                    val saved = withContext(Dispatchers.IO) {
+                        rigViewModel.initializeAudioEnvironment(applicationContext)
+                    }
                     val hasMic = ContextCompat.checkSelfPermission(
                         this@MainActivity,
                         Manifest.permission.RECORD_AUDIO,
                     ) == PackageManager.PERMISSION_GRANTED
                     if (hasMic) {
                         withContext(Dispatchers.IO) {
-                            rigViewModel.startAudioEngine(applicationContext)
+                            rigViewModel.startAudioEngine(applicationContext, saved)
                         }
                     } else {
                         audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
@@ -147,6 +150,21 @@ class MainActivity : ComponentActivity() {
                     onStartAudio = {
                         lifecycleScope.launch(Dispatchers.IO) {
                             rigViewModel.startAudioEngine(applicationContext)
+                        }
+                    },
+                    onLiveBufferChange = { frames, mode, mult ->
+                        lifecycleScope.launch(Dispatchers.IO) {
+                            rigViewModel.setLiveBufferFrames(applicationContext, frames, mode, mult)
+                        }
+                    },
+                    onResetBufferMin = {
+                        lifecycleScope.launch(Dispatchers.IO) {
+                            rigViewModel.resetBufferToMinimum(applicationContext)
+                        }
+                    },
+                    onRefreshAudioDevices = {
+                        lifecycleScope.launch(Dispatchers.IO) {
+                            rigViewModel.refreshAudioDevices(applicationContext)
                         }
                     },
                     onDestinationChanged = { currentDest = it },

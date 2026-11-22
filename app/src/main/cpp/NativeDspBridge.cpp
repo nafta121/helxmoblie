@@ -24,9 +24,11 @@ extern "C" {
 JNIEXPORT jboolean JNICALL
 Java_com_cleanroom_stadiumdsp_NativeDspBridge_nativeStartAudio(
     JNIEnv* /*env*/, jobject /*thiz*/, jboolean enable_input, jint input_device_id,
-    jint output_device_id, jint burst_multiplier) {
+    jint output_device_id, jint burst_multiplier, jint requested_buffer_frames,
+    jboolean auto_xrun_guard) {
     return Engine().Start(enable_input == JNI_TRUE, input_device_id, output_device_id,
-                          burst_multiplier)
+                          burst_multiplier, requested_buffer_frames,
+                          auto_xrun_guard == JNI_TRUE)
                ? JNI_TRUE
                : JNI_FALSE;
 }
@@ -43,14 +45,37 @@ Java_com_cleanroom_stadiumdsp_NativeDspBridge_nativeIsAudioRunning(
     return Engine().IsRunning() ? JNI_TRUE : JNI_FALSE;
 }
 
+JNIEXPORT jint JNICALL
+Java_com_cleanroom_stadiumdsp_NativeDspBridge_nativeSetLiveBufferSizeFrames(
+    JNIEnv* /*env*/, jobject /*thiz*/, jint target_frames) {
+    return Engine().SetLiveBufferSizeFrames(target_frames);
+}
+
+JNIEXPORT void JNICALL
+Java_com_cleanroom_stadiumdsp_NativeDspBridge_nativeSetAutoXrunGuard(
+    JNIEnv* /*env*/, jobject /*thiz*/, jboolean enabled) {
+    Engine().SetAutoXrunGuard(enabled == JNI_TRUE);
+}
+
 JNIEXPORT void JNICALL
 Java_com_cleanroom_stadiumdsp_NativeDspBridge_nativeGetStreamDiagnostics(
-    JNIEnv* env, jobject /*thiz*/, jintArray out_int5) {
-    if (!out_int5 || env->GetArrayLength(out_int5) < 5) return;
+    JNIEnv* env, jobject /*thiz*/, jintArray out_int8) {
+    if (!out_int8) return;
+    const jsize len = env->GetArrayLength(out_int8);
+    if (len < 5) return;
     const auto d = Engine().GetDiagnostics();
-    jint vals[5] = {d.sample_rate, d.frames_per_burst, d.buffer_size_frames, d.is_mmap_used,
-                    d.xrun_count};
-    env->SetIntArrayRegion(out_int5, 0, 5, vals);
+    jint vals[8] = {
+        d.sample_rate,
+        d.frames_per_burst,
+        d.buffer_size_frames,
+        d.is_mmap_used,
+        d.xrun_count,
+        d.buffer_capacity_frames,
+        d.input_frames_per_burst,
+        d.measured_latency_us,
+    };
+    const jsize count = std::min<jsize>(len, 8);
+    env->SetIntArrayRegion(out_int8, 0, count, vals);
 }
 
 JNIEXPORT jboolean JNICALL

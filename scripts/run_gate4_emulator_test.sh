@@ -12,7 +12,7 @@ echo "=== [Gate 4] Starting Headless Android 12 ATD Emulator ($AVD_NAME) ==="
 rm -rf "$HOME/.android/avd/${AVD_NAME}.avd/"*.lock || true
 export ANDROID_I_WANT_MY_TCG=yes
 "$EMULATOR" -avd "$AVD_NAME" \
-    -no-window -no-boot-anim -no-snapshot -read-only -gpu swiftshader_indirect \
+    -no-window -no-boot-anim -no-snapshot -wipe-data -gpu swiftshader_indirect \
     -accel off -memory 2048 -cores 2 -no-metrics \
     -feature -ModemSimulator,-GnssGrpcV1,-WiFiPacketStream,-Uwb \
     >/tmp/stadium_emulator.log 2>&1 &
@@ -26,7 +26,7 @@ trap cleanup EXIT
 
 echo "=== [1/5] Waiting for emulator-5554 sys.boot_completed=1 ==="
 BOOTED=0
-for i in $(seq 1 60); do
+for i in $(seq 1 70); do
     if ! kill -0 "$EMU_PID" 2>/dev/null; then
         echo "ERROR: emulator process exited early!"
         tail -n 30 /tmp/stadium_emulator.log || true
@@ -46,13 +46,35 @@ for i in $(seq 1 60); do
 done
 
 if [[ "$BOOTED" != "1" ]]; then
-    echo "ERROR: emulator-5554 did not finish booting within 300s"
+    echo "ERROR: emulator-5554 did not finish booting within 350s"
     tail -n 30 /tmp/stadium_emulator.log || true
     exit 1
 fi
 
 echo "=== [2/5] Installing $APK_PATH & Granting RECORD_AUDIO ==="
-"$ADB" -s emulator-5554 install -r "$APK_PATH"
+for p in $(seq 1 20); do
+    if "$ADB" -s emulator-5554 shell pm path android >/dev/null 2>&1; then
+        break
+    fi
+    sleep 3
+done
+"$ADB" -s emulator-5554 push "$APK_PATH" /data/local/tmp/stadium_gate4.apk
+INSTALLED=0
+for attempt in 1 2 3 4 5 6; do
+    if "$ADB" -s emulator-5554 shell pm path android >/dev/null 2>&1 && \
+       "$ADB" -s emulator-5554 shell pm install -r /data/local/tmp/stadium_gate4.apk; then
+        INSTALLED=1
+        break
+    fi
+    echo "Retrying pm install ($attempt/6) after 10s..."
+    sleep 10
+done
+if [[ "$INSTALLED" != "1" ]]; then
+    echo "ERROR: pm install failed after 3 attempts"
+    "$ADB" -s emulator-5554 logcat -d | grep -iE "PackageManager|Watchdog|FATAL|system_server" | tail -n 25 || true
+    exit 1
+fi
+"$ADB" -s emulator-5554 shell rm -f /data/local/tmp/stadium_gate4.apk || true
 "$ADB" -s emulator-5554 shell pm grant "$PKG" android.permission.RECORD_AUDIO || true
 "$ADB" -s emulator-5554 logcat -c
 

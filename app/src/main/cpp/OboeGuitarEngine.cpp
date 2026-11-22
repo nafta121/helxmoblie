@@ -82,14 +82,17 @@ void OboeGuitarEngine::CloseAdpfSession() noexcept {
 }
 
 bool OboeGuitarEngine::Start(bool enable_input, int32_t input_device_id,
-                             int32_t output_device_id, int32_t burst_multiplier) {
+                             int32_t output_device_id, int32_t burst_multiplier,
+                             int32_t requested_buffer_frames, bool auto_xrun_guard) {
     Stop();
     std::lock_guard<std::mutex> lock(stream_mutex_);
 
     last_enable_input_ = enable_input;
     last_input_device_id_ = input_device_id;
     last_output_device_id_ = output_device_id;
-    last_burst_multiplier_ = std::max(1, std::min(burst_multiplier, 8));
+    last_burst_multiplier_ = std::max(1, std::min(burst_multiplier, 16));
+    last_requested_buffer_frames_ = std::max(0, requested_buffer_frames);
+    auto_xrun_guard_.store(auto_xrun_guard, std::memory_order_release);
 
     // 1. Open Stereo Output Stream (AAudio LowLatency Exclusive + 48 kHz SRC fallback)
     oboe::AudioStreamBuilder out_builder;
@@ -114,6 +117,17 @@ bool OboeGuitarEngine::Start(bool enable_input, int32_t input_device_id,
              oboe::convertToText(out_res));
         out_builder.setSharingMode(oboe::SharingMode::Shared);
         out_res = out_builder.openStream(output_stream_);
+        if ((out_res != oboe::Result::OK || !output_stream_) && output_device_id > 0) {
+            LOGW("Requested output device %d unavailable; falling back to System Default",
+                 output_device_id);
+            out_builder.setDeviceId(oboe::kUnspecified)
+                ->setSharingMode(oboe::SharingMode::Exclusive);
+            out_res = out_builder.openStream(output_stream_);
+            if (out_res != oboe::Result::OK || !output_stream_) {
+                out_builder.setSharingMode(oboe::SharingMode::Shared);
+                out_res = out_builder.openStream(output_stream_);
+            }
+        }
         if (out_res != oboe::Result::OK || !output_stream_) {
             LOGE("Failed to open output stream: %s", oboe::convertToText(out_res));
             return false;
@@ -121,7 +135,12 @@ bool OboeGuitarEngine::Start(bool enable_input, int32_t input_device_id,
     }
 
     const int32_t burst = std::max(16, output_stream_->getFramesPerBurst());
-    output_stream_->setBufferSizeInFrames(burst * last_burst_multiplier_);
+    const int32_t cap = std::max(burst, output_stream_->getBufferCapacityInFrames());
+    const int32_t desired_frames = (last_requested_buffer_frames_ > 0)
+                                       ? last_requested_buffer_frames_
+                                       : (burst * last_burst_multiplier_);
+    const int32_t clamped_frames = std::max(burst, std::min(desired_frames, cap));
+    output_stream_->setBufferSizeInFrames(clamped_frames);
 
     // 2. Open Optional Mono Instrument Input Stream (Unprocessed Raw Guitar/Bass DI)
     has_input_.store(false, std::memory_order_release);
@@ -147,14 +166,26 @@ bool OboeGuitarEngine::Start(bool enable_input, int32_t input_device_id,
             in_builder.setSharingMode(oboe::SharingMode::Shared);
             in_res = in_builder.openStream(input_stream_);
         }
+        if ((in_res != oboe::Result::OK || !input_stream_) && input_device_id > 0) {
+            LOGW("Requested input device %d unavailable; falling back to System Default",
+                 input_device_id);
+            in_builder.setDeviceId(oboe::kUnspecified)
+                ->setSharingMode(oboe::SharingMode::Exclusive);
+            in_res = in_builder.openStream(input_stream_);
+            if (in_res != oboe::Result::OK || !input_stream_) {
+                in_builder.setSharingMode(oboe::SharingMode::Shared);
+                in_res = in_builder.openStream(input_stream_);
+            }
+        }
 
         if (in_res == oboe::Result::OK && input_stream_) {
             if (input_stream_->requestStart() == oboe::Result::OK) {
                 has_input_.store(true, std::memory_order_release);
-                LOGI("Full-duplex input stream active (sr=%d, burst=%d, aaudio_excl=%d)",
+                LOGI("Full-duplex input stream active (sr=%d, burst=%d, aaudio_excl=%d, dev=%d)",
                      input_stream_->getSampleRate(), input_stream_->getFramesPerBurst(),
                      (input_stream_->usesAAudio() &&
-                      input_stream_->getSharingMode() == oboe::SharingMode::Exclusive) ? 1 : 0);
+                      input_stream_->getSharingMode() == oboe::SharingMode::Exclusive) ? 1 : 0,
+                     input_stream_->getDeviceId());
             } else {
                 input_stream_->close();
                 input_stream_.reset();
@@ -181,12 +212,13 @@ bool OboeGuitarEngine::Start(bool enable_input, int32_t input_device_id,
     }
 
     is_running_.store(true, std::memory_order_release);
-    LOGI("Stadium Oboe Engine STARTED (sr=%d, burst=%d, buf=%d, aaudio_excl=%d, input=%d)",
+    LOGI("Stadium Oboe Engine STARTED (sr=%d, burst=%d, buf=%d/%d, aaudio_excl=%d, input=%d, outDev=%d)",
          output_stream_->getSampleRate(), output_stream_->getFramesPerBurst(),
-         output_stream_->getBufferSizeInFrames(),
+         output_stream_->getBufferSizeInFrames(), output_stream_->getBufferCapacityInFrames(),
          (output_stream_->usesAAudio() &&
           output_stream_->getSharingMode() == oboe::SharingMode::Exclusive) ? 1 : 0,
-         has_input_.load(std::memory_order_acquire) ? 1 : 0);
+         has_input_.load(std::memory_order_acquire) ? 1 : 0,
+         output_stream_->getDeviceId());
     return true;
 }
 
@@ -208,6 +240,23 @@ void OboeGuitarEngine::Stop() {
     CloseAdpfSession();
 }
 
+int32_t OboeGuitarEngine::SetLiveBufferSizeFrames(int32_t target_frames) noexcept {
+    std::lock_guard<std::mutex> lock(stream_mutex_);
+    last_requested_buffer_frames_ = std::max(0, target_frames);
+    if (!output_stream_) {
+        return last_requested_buffer_frames_;
+    }
+    const int32_t burst = std::max(16, output_stream_->getFramesPerBurst());
+    const int32_t cap = std::max(burst, output_stream_->getBufferCapacityInFrames());
+    const int32_t req = (target_frames > 0) ? target_frames : (burst * last_burst_multiplier_);
+    const int32_t clamped = std::max(burst, std::min(req, cap));
+    auto res = output_stream_->setBufferSizeInFrames(clamped);
+    const int32_t applied = res ? res.value() : output_stream_->getBufferSizeInFrames();
+    LOGI("Live Buffer Size Adjusted (0-ms glitch): req=%df -> applied=%df / cap=%df (burst=%df)",
+         target_frames, applied, cap, burst);
+    return applied;
+}
+
 AudioStreamDiagnostics OboeGuitarEngine::GetDiagnostics() const noexcept {
     AudioStreamDiagnostics d;
     std::lock_guard<std::mutex> lock(stream_mutex_);
@@ -215,12 +264,29 @@ AudioStreamDiagnostics OboeGuitarEngine::GetDiagnostics() const noexcept {
         d.sample_rate = output_stream_->getSampleRate();
         d.frames_per_burst = output_stream_->getFramesPerBurst();
         d.buffer_size_frames = output_stream_->getBufferSizeInFrames();
+        d.buffer_capacity_frames = std::max(d.frames_per_burst,
+                                            output_stream_->getBufferCapacityInFrames());
         d.is_mmap_used = (output_stream_->usesAAudio() &&
                           output_stream_->getSharingMode() == oboe::SharingMode::Exclusive)
                              ? 1
                              : 0;
         auto xrun = output_stream_->getXRunCount();
         d.xrun_count = xrun ? xrun.value() : 0;
+
+        auto out_lat = output_stream_->calculateLatencyMillis();
+        if (out_lat && out_lat.value() > 0.0) {
+            double total_ms = out_lat.value();
+            if (input_stream_) {
+                auto in_lat = input_stream_->calculateLatencyMillis();
+                if (in_lat && in_lat.value() > 0.0) {
+                    total_ms += in_lat.value();
+                }
+            }
+            d.measured_latency_us = static_cast<int32_t>(total_ms * 1000.0);
+        }
+    }
+    if (input_stream_ && has_input_.load(std::memory_order_acquire)) {
+        d.input_frames_per_burst = input_stream_->getFramesPerBurst();
     }
     return d;
 }
@@ -291,7 +357,8 @@ void OboeGuitarEngine::onErrorAfterClose(oboe::AudioStream* /*oboe_stream*/, obo
         LOGW("Audio device disconnected; restarting Oboe stream cleanly on background thread");
         std::thread([this]() {
             Start(last_enable_input_, last_input_device_id_, last_output_device_id_,
-                  last_burst_multiplier_);
+                  last_burst_multiplier_, last_requested_buffer_frames_,
+                  auto_xrun_guard_.load(std::memory_order_acquire));
         }).detach();
     }
 }

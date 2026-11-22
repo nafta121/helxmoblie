@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.KeyboardArrowUp
@@ -32,11 +33,15 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -50,11 +55,15 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.cleanroom.stadiumdsp.LiveTelemetryUi
+import com.cleanroom.stadiumdsp.audio.AudioBufferPlanner
+import com.cleanroom.stadiumdsp.audio.AudioDeviceOption
 import com.cleanroom.stadiumdsp.audio.AudioDspSettings
+import com.cleanroom.stadiumdsp.audio.BufferSizeMode
 import com.cleanroom.stadiumdsp.audio.OboeSessionController
 import com.cleanroom.stadiumdsp.ui.state.StadiumUiState
 import com.cleanroom.stadiumdsp.ui.theme.StadiumColors
 import kotlinx.coroutines.flow.StateFlow
+import kotlin.math.roundToInt
 
 @Composable
 fun StadiumTopInstanceBar(
@@ -76,6 +85,9 @@ fun StadiumTopInstanceBar(
     onCopyAB: () -> Unit,
     onApplyAudioSettings: (AudioDspSettings) -> Unit,
     onStartAudio: () -> Unit,
+    onLiveBufferChange: (Int, BufferSizeMode, Int) -> Unit = { _, _, _ -> },
+    onResetBufferMin: () -> Unit = {},
+    onRefreshAudioDevices: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     var showSettingsDialog by rememberSaveable { mutableStateOf(false) }
@@ -458,6 +470,9 @@ fun StadiumTopInstanceBar(
                 showSettingsDialog = false
             },
             onStartAudio = onStartAudio,
+            onLiveBufferChange = onLiveBufferChange,
+            onResetBufferMin = onResetBufferMin,
+            onRefreshAudioDevices = onRefreshAudioDevices,
         )
     }
 }
@@ -526,76 +541,408 @@ private fun AudioDspSettingsDialog(
     onDismiss: () -> Unit,
     onApplySettings: (AudioDspSettings) -> Unit,
     onStartAudio: () -> Unit,
+    onLiveBufferChange: (Int, BufferSizeMode, Int) -> Unit,
+    onResetBufferMin: () -> Unit,
+    onRefreshAudioDevices: () -> Unit,
 ) {
+    LaunchedEffect(Unit) {
+        onRefreshAudioDevices()
+    }
+
     val t by telemetryFlow.collectAsStateWithLifecycle()
+    val diag = state.streamDiagnostics
+    val burst = diag.framesPerBurst.coerceAtLeast(16)
+    val capacity = diag.bufferCapacityFrames.coerceAtLeast(burst)
+
     var enableMic by rememberSaveable { mutableStateOf(state.audioSettings.enableMicrophoneInput) }
-    var burstMult by rememberSaveable { mutableStateOf(state.audioSettings.burstMultiplier) }
+    var selectedInputId by rememberSaveable { mutableIntStateOf(state.audioSettings.inputDeviceId) }
+    var selectedOutputId by rememberSaveable { mutableIntStateOf(state.audioSettings.outputDeviceId) }
+    var bufferModeName by rememberSaveable { mutableStateOf(state.audioSettings.bufferSizeMode.name) }
+    var burstMult by rememberSaveable { mutableIntStateOf(state.audioSettings.burstMultiplier) }
+    var requestedFrames by rememberSaveable {
+        mutableIntStateOf(
+            if (state.audioSettings.requestedBufferFrames > 0) state.audioSettings.requestedBufferFrames
+            else diag.bufferSizeFrames.coerceAtLeast(burst)
+        )
+    }
+    var autoXrunGuard by rememberSaveable { mutableStateOf(state.audioSettings.autoXrunGuard) }
     var keepAwake by rememberSaveable { mutableStateOf(state.audioSettings.keepScreenAwakeInLive) }
 
+    val bufferMode = runCatching { BufferSizeMode.valueOf(bufferModeName) }
+        .getOrDefault(BufferSizeMode.HARDWARE_BURST)
     val headroomPct = OboeSessionController.estimateDspCompatibilityPct(t.rtCpuLoadPct)
+
+    val hwOptions = AudioBufferPlanner.buildHardwareAlignedOptions(
+        sampleRate = diag.sampleRate,
+        framesPerBurst = burst,
+        bufferCapacityFrames = capacity,
+    )
+    val dawPresets = AudioBufferPlanner.buildFixedFramePresets(
+        sampleRate = diag.sampleRate,
+        framesPerBurst = burst,
+        bufferCapacityFrames = capacity,
+    )
+
+    val candidateSettings = state.audioSettings.copy(
+        enableMicrophoneInput = enableMic,
+        inputDeviceId = selectedInputId,
+        outputDeviceId = selectedOutputId,
+        bufferSizeMode = bufferMode,
+        burstMultiplier = burstMult,
+        requestedBufferFrames = if (bufferMode == BufferSizeMode.FIXED_FRAMES) requestedFrames else 0,
+        autoXrunGuard = autoXrunGuard,
+        keepScreenAwakeInLive = keepAwake,
+    )
+    val requiresRestart = AudioBufferPlanner.needsStreamRestart(state.audioSettings, candidateSettings)
+    val selectedOutputDevice = state.availableOutputDevices.firstOrNull { it.id == selectedOutputId }
 
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = StadiumColors.SurfaceBar,
         title = {
-            Text("Audio / DSP Engine Settings", color = StadiumColors.TextPrimary)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("Audio / Buffer Settings", color = StadiumColors.TextPrimary, fontSize = 17.sp)
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(if (diag.isMmapUsed) StadiumColors.DelayEmerald.copy(alpha = 0.2f) else StadiumColors.DistortionAmber.copy(alpha = 0.2f))
+                        .border(
+                            1.dp,
+                            if (diag.isMmapUsed) StadiumColors.DelayEmerald else StadiumColors.DistortionAmber,
+                            RoundedCornerShape(4.dp),
+                        )
+                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                ) {
+                    Text(
+                        text = if (diag.isMmapUsed) "MMAP EXCL" else "AAUDIO",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (diag.isMmapUsed) StadiumColors.DelayEmerald else StadiumColors.DistortionAmber,
+                    )
+                }
+            }
         },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text(
-                    text = "Stream: ${if (state.isAudioRunning) "RUNNING" else "STOPPED"} • ${state.streamDiagnostics.sampleRate} Hz • " +
-                        "Burst ${state.streamDiagnostics.framesPerBurst}f • ${String.format("%.1f ms", state.streamDiagnostics.roundTripLatencyMs)} • " +
-                        "XRuns: ${state.streamDiagnostics.xRunCount}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = StadiumColors.BadgeCyan,
-                )
-                Text(
-                    text = "RT CPU Load: ${String.format("%.1f%%", t.rtCpuLoadPct)} • Hardware DSP Headroom: $headroomPct%",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (headroomPct >= 70) StadiumColors.DelayEmerald else StadiumColors.DistortionAmber,
-                )
-                Text(
-                    text = "MIDI Controllers: ${if (state.connectedMidiDevices.isEmpty()) "Waiting for USB / BLE MIDI..." else state.connectedMidiDevices.joinToString()}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = StadiumColors.TextSecondary,
-                )
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                // Live Stream Telemetry Card
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(StadiumColors.SurfaceDeep)
+                        .border(1.dp, StadiumColors.BorderSubtle, RoundedCornerShape(6.dp))
+                        .padding(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(3.dp),
+                ) {
+                    Text(
+                        text = "${if (state.isAudioRunning) "RUNNING" else "STOPPED"} • ${diag.sampleRate} Hz • HW Burst ${burst}f • Buf ${diag.bufferSizeFrames}f / ${capacity}f",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = StadiumColors.BadgeCyan,
+                    )
+                    Text(
+                        text = String.format(
+                            "Out Buf: %.2f ms • %s: %.2f ms • XRuns: %d",
+                            diag.outputBufferMs,
+                            if (diag.measuredLatencyMs != null) "HW RTL" else "Est Buf RTL",
+                            diag.roundTripLatencyMs,
+                            diag.xRunCount,
+                        ),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = StadiumColors.TextPrimary,
+                    )
+                    Text(
+                        text = "RT CPU: ${String.format("%.1f%%", t.rtCpuLoadPct)} • DSP Headroom: $headroomPct%",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (headroomPct >= 70) StadiumColors.DelayEmerald else StadiumColors.DistortionAmber,
+                    )
+                    Text(
+                        text = "MIDI: ${if (state.connectedMidiDevices.isEmpty()) "Waiting for USB / BLE MIDI..." else state.connectedMidiDevices.joinToString()}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = StadiumColors.TextMuted,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
 
                 HorizontalDivider(color = StadiumColors.BorderSubtle)
 
+                // SECTION 1: Input & Output Audio Device Picker (Opsi C)
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text("Full-Duplex Guitar/Mic Input", color = StadiumColors.TextPrimary, fontSize = 13.sp)
+                    Text(
+                        text = "Audio I/O Devices (USB-C / Wired)",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = StadiumColors.TextPrimary,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(5.dp))
+                            .background(StadiumColors.SurfaceCard)
+                            .border(1.dp, StadiumColors.BorderSubtle, RoundedCornerShape(5.dp))
+                            .clickable(onClick = onRefreshAudioDevices)
+                            .padding(horizontal = 8.dp, vertical = 3.dp),
+                    ) {
+                        Text("Rescan", style = MaterialTheme.typography.labelSmall, color = StadiumColors.BadgeCyan)
+                    }
+                }
+
+                DevicePickerRow(
+                    title = "Input",
+                    devices = state.availableInputDevices,
+                    selectedId = selectedInputId,
+                    onSelect = { selectedInputId = it },
+                )
+
+                DevicePickerRow(
+                    title = "Output",
+                    devices = state.availableOutputDevices,
+                    selectedId = selectedOutputId,
+                    onSelect = { selectedOutputId = it },
+                )
+
+                if (selectedOutputDevice?.isBluetoothWarning == true) {
+                    Text(
+                        text = "Warning: Bluetooth audio adds 80–200 ms latency. Use USB-C or wired headphones for live guitar.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = StadiumColors.DistortionAmber,
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("Full-Duplex Guitar/Mic Input", color = StadiumColors.TextPrimary, fontSize = 12.sp)
                     Switch(checked = enableMic, onCheckedChange = { enableMic = it })
                 }
 
+                HorizontalDivider(color = StadiumColors.BorderSubtle)
+
+                // SECTION 2: Hybrid Buffer Size Control (Opsi A HW Burst + Opsi B Fixed Frames + Live Slider)
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text("Keep Screen Awake in LIVE Mode", color = StadiumColors.TextPrimary, fontSize = 13.sp)
-                    Switch(checked = keepAwake, onCheckedChange = { keepAwake = it })
+                    Text(
+                        text = "Buffer Size (Live 0-ms Glitch)",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = StadiumColors.TextPrimary,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(5.dp))
+                            .background(StadiumColors.SurfaceCard)
+                            .border(1.dp, StadiumColors.DelayEmerald, RoundedCornerShape(5.dp))
+                            .clickable {
+                                bufferModeName = BufferSizeMode.HARDWARE_BURST.name
+                                burstMult = 1
+                                requestedFrames = burst
+                                onResetBufferMin()
+                            }
+                            .padding(horizontal = 8.dp, vertical = 3.dp),
+                    ) {
+                        Text("Reset 1x Min", style = MaterialTheme.typography.labelSmall, color = StadiumColors.DelayEmerald)
+                    }
                 }
 
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("Oboe Buffer Burst Multiplier", color = StadiumColors.TextSecondary, fontSize = 12.sp)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        listOf(1 to "1x Ultra", 2 to "2x Stage", 4 to "4x Safe").forEach { (mult, lbl) ->
-                            val sel = burstMult == mult
-                            Box(
+                // Mode Switch: HW Burst (MMAP) vs Fixed Frames (DAW)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    BufferSizeMode.entries.forEach { mode ->
+                        val active = bufferMode == mode
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(if (active) StadiumColors.AmpRed else StadiumColors.SurfaceCard)
+                                .border(1.dp, if (active) StadiumColors.AmpRed else StadiumColors.BorderSubtle, RoundedCornerShape(6.dp))
+                                .clickable { bufferModeName = mode.name }
+                                .padding(vertical = 6.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(mode.label, style = MaterialTheme.typography.labelSmall, color = Color.White)
+                        }
+                    }
+                }
+
+                if (bufferMode == BufferSizeMode.HARDWARE_BURST) {
+                    // Opsi A: Hardware-Aligned Burst Multiples
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        hwOptions.forEach { opt ->
+                            val mult = opt.multiplier ?: 1
+                            val selected = burstMult == mult
+                            Column(
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(6.dp))
-                                    .background(if (sel) StadiumColors.AmpRed else StadiumColors.SurfaceCard)
-                                    .clickable { burstMult = mult }
-                                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                                    .background(if (selected) StadiumColors.AmpRed else StadiumColors.SurfaceCard)
+                                    .border(
+                                        1.dp,
+                                        if (selected) Color.White.copy(alpha = 0.7f) else StadiumColors.BorderSubtle,
+                                        RoundedCornerShape(6.dp),
+                                    )
+                                    .clickable {
+                                        burstMult = mult
+                                        requestedFrames = opt.frames
+                                        onLiveBufferChange(opt.frames, BufferSizeMode.HARDWARE_BURST, mult)
+                                    }
+                                    .padding(horizontal = 9.dp, vertical = 6.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
                             ) {
-                                Text(lbl, style = MaterialTheme.typography.labelSmall, color = Color.White)
+                                Text(opt.label, style = MaterialTheme.typography.labelSmall, color = Color.White, fontWeight = FontWeight.Bold)
+                                Text(
+                                    text = String.format("%df • %.1fms", opt.frames, opt.latencyMs),
+                                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                                    color = if (selected) Color.White else StadiumColors.BadgeCyan,
+                                )
                             }
                         }
                     }
+                } else {
+                    // Opsi B: Classic DAW / ASIO Fixed Frame Presets (★ = Native MMAP aligned to HW burst)
+                    Text(
+                        text = "★ = Native MMAP aligned (kelipatan burst ${burst}f). Nilai di luar [${burst}f..${capacity}f] di-clamp otomatis oleh HAL.",
+                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                        color = StadiumColors.TextMuted,
+                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        dawPresets.forEach { opt ->
+                            val selected = requestedFrames == opt.frames
+                            Column(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(
+                                        when {
+                                            selected -> StadiumColors.AmpRed
+                                            opt.isWithinCapacity -> StadiumColors.SurfaceCard
+                                            else -> StadiumColors.SurfaceDeep
+                                        }
+                                    )
+                                    .border(
+                                        1.dp,
+                                        when {
+                                            selected -> Color.White.copy(alpha = 0.7f)
+                                            opt.isNativeAligned -> StadiumColors.BadgeCyan.copy(alpha = 0.7f)
+                                            else -> StadiumColors.BorderSubtle
+                                        },
+                                        RoundedCornerShape(6.dp),
+                                    )
+                                    .clickable {
+                                        requestedFrames = opt.frames
+                                        val estMult = (opt.frames / burst).coerceIn(1, 16)
+                                        burstMult = estMult
+                                        onLiveBufferChange(opt.frames, BufferSizeMode.FIXED_FRAMES, estMult)
+                                    }
+                                    .padding(horizontal = 8.dp, vertical = 5.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                            ) {
+                                Text(
+                                    text = if (opt.isNativeAligned) "★ ${opt.frames}f" else "${opt.frames}f",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (opt.isWithinCapacity || selected) Color.White else StadiumColors.TextMuted,
+                                    fontWeight = if (opt.isNativeAligned) FontWeight.Bold else FontWeight.Normal,
+                                )
+                                Text(
+                                    text = String.format("%.1fms", opt.latencyMs),
+                                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                                    color = if (selected) Color.White else StadiumColors.TextSecondary,
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // Live Fine Buffer Slider (active when hardware capacity > 1 burst)
+                if (capacity > burst) {
+                    val sliderMin = burst.toFloat()
+                    val sliderMax = capacity.toFloat()
+                    val currentSliderFrames = diag.bufferSizeFrames.coerceIn(burst, capacity)
+                    val stepCount = ((capacity - burst) / burst - 1).coerceAtLeast(0)
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            Text("Fine Live Buffer", style = MaterialTheme.typography.labelSmall, color = StadiumColors.TextSecondary)
+                            Text(
+                                text = String.format(
+                                    "%df / %df (%.2f ms)",
+                                    currentSliderFrames,
+                                    capacity,
+                                    AudioBufferPlanner.framesToMs(currentSliderFrames, diag.sampleRate),
+                                ),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = StadiumColors.BadgeCyan,
+                            )
+                        }
+                        Slider(
+                            value = currentSliderFrames.toFloat(),
+                            onValueChange = { raw ->
+                                val snapped = ((raw / burst).roundToInt().coerceAtLeast(1) * burst).coerceIn(burst, capacity)
+                                requestedFrames = snapped
+                                val newMult = (snapped / burst).coerceIn(1, 16)
+                                burstMult = newMult
+                                onLiveBufferChange(snapped, bufferMode, newMult)
+                            },
+                            valueRange = sliderMin..sliderMax,
+                            steps = stepCount,
+                            colors = SliderDefaults.colors(
+                                thumbColor = StadiumColors.AmpRed,
+                                activeTrackColor = StadiumColors.AmpRed,
+                                inactiveTrackColor = StadiumColors.SurfaceSliderTrack,
+                            ),
+                        )
+                    }
+                }
+
+                // Auto XRun Guard & Keep Screen Awake
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Auto XRun Guard", color = StadiumColors.TextPrimary, fontSize = 12.sp)
+                        Text(
+                            "Otomatis naik +1 burst bila ada dropout/XRun",
+                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                            color = StadiumColors.TextMuted,
+                        )
+                    }
+                    Switch(checked = autoXrunGuard, onCheckedChange = { autoXrunGuard = it })
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("Keep Screen Awake in LIVE Mode", color = StadiumColors.TextPrimary, fontSize = 12.sp)
+                    Switch(checked = keepAwake, onCheckedChange = { keepAwake = it })
                 }
             }
         },
@@ -610,18 +957,15 @@ private fun AudioDspSettingsDialog(
                     }
                 }
                 Button(
-                    onClick = {
-                        onApplySettings(
-                            state.audioSettings.copy(
-                                enableMicrophoneInput = enableMic,
-                                burstMultiplier = burstMult,
-                                keepScreenAwakeInLive = keepAwake,
-                            )
-                        )
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = StadiumColors.AmpRed),
+                    onClick = { onApplySettings(candidateSettings) },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (requiresRestart) StadiumColors.AmpRed else StadiumColors.DelayEmerald,
+                    ),
                 ) {
-                    Text("Apply")
+                    Text(
+                        text = if (requiresRestart) "Apply & Restart" else "Save",
+                        color = if (requiresRestart) Color.White else Color.Black,
+                    )
                 }
             }
         },
@@ -631,4 +975,62 @@ private fun AudioDspSettingsDialog(
             }
         },
     )
+}
+
+@Composable
+private fun DevicePickerRow(
+    title: String,
+    devices: List<AudioDeviceOption>,
+    selectedId: Int,
+    onSelect: (Int) -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(title, style = MaterialTheme.typography.labelSmall, color = StadiumColors.TextSecondary)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            devices.forEach { dev ->
+                val selected = dev.id == selectedId
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(if (selected) StadiumColors.SurfaceSelected else StadiumColors.SurfaceCard)
+                        .border(
+                            1.dp,
+                            when {
+                                selected -> StadiumColors.AmpRed
+                                dev.isUsbOrPro -> StadiumColors.BadgeCyan.copy(alpha = 0.6f)
+                                dev.isBluetoothWarning -> StadiumColors.DistortionAmber.copy(alpha = 0.6f)
+                                else -> StadiumColors.BorderSubtle
+                            },
+                            RoundedCornerShape(6.dp),
+                        )
+                        .clickable { onSelect(dev.id) }
+                        .padding(horizontal = 8.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                ) {
+                    Text(
+                        text = dev.name,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (selected) Color.White else StadiumColors.TextPrimary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = dev.typeBadge,
+                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp),
+                        color = when {
+                            dev.isUsbOrPro -> StadiumColors.BadgeCyan
+                            dev.isBluetoothWarning -> StadiumColors.DistortionAmber
+                            else -> StadiumColors.TextMuted
+                        },
+                    )
+                }
+            }
+        }
+    }
 }

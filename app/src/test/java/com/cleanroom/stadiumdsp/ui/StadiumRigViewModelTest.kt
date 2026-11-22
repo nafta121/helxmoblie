@@ -16,14 +16,40 @@ private class FakeDspBridge : DspBridgeGateway {
     val sent = mutableListOf<SentCmd>()
     var recalledSnapshots = mutableListOf<Int>()
     var running = true
+    var currentDiagnostics = StreamDiagnosticsUi(
+        sampleRate = 48000,
+        framesPerBurst = 96,
+        bufferSizeFrames = 192,
+        bufferCapacityFrames = 768,
+        isMmapUsed = true,
+        xRunCount = 0,
+    )
+    var liveBufferCalls = mutableListOf<Int>()
+    var autoXrunGuardEnabled = true
 
     override val isNativeAvailable: Boolean = true
-    override fun startAudio(enableInput: Boolean, inputDeviceId: Int, outputDeviceId: Int, burstMultiplier: Int): Boolean {
-        running = true; return true
+    override fun startAudio(
+        enableInput: Boolean,
+        inputDeviceId: Int,
+        outputDeviceId: Int,
+        burstMultiplier: Int,
+        requestedBufferFrames: Int,
+        autoXrunGuard: Boolean,
+    ): Boolean {
+        running = true
+        autoXrunGuardEnabled = autoXrunGuard
+        return true
     }
     override fun stopAudio() { running = false }
     override fun isAudioRunning(): Boolean = running
-    override fun getStreamDiagnostics(): StreamDiagnosticsUi = StreamDiagnosticsUi()
+    override fun setLiveBufferSizeFrames(targetFrames: Int): Int {
+        val clamped = targetFrames.coerceIn(currentDiagnostics.framesPerBurst, currentDiagnostics.bufferCapacityFrames)
+        liveBufferCalls.add(clamped)
+        currentDiagnostics = currentDiagnostics.copy(bufferSizeFrames = clamped)
+        return clamped
+    }
+    override fun setAutoXrunGuard(enabled: Boolean) { autoXrunGuardEnabled = enabled }
+    override fun getStreamDiagnostics(): StreamDiagnosticsUi = currentDiagnostics
     override fun enqueueCommand(type: Int, targetId: Int, paramId: Int, flags: Int, value0: Float, value1: Float, value2: Float, intVal: Int): Boolean {
         sent.add(SentCmd(type, targetId, paramId, value0, intVal))
         return true
@@ -106,6 +132,23 @@ class StadiumRigViewModelTest {
         assertTrue(vm.uiState.value.isCompareSlotB)
         vm.toggleCompareAB()
         assertFalse(vm.uiState.value.isCompareSlotB)
+    }
+
+    @Test
+    fun autoXrunGuardStepsUpLiveBufferAfterWarmupWithoutRestartingStream() {
+        val bridge = FakeDspBridge()
+        val vm = StadiumRigViewModel(bridge = bridge)
+
+        // 3 warmup ticks (~3 seconds) should NOT bump even if cold-start XRuns exist
+        bridge.currentDiagnostics = bridge.currentDiagnostics.copy(xRunCount = 2)
+        repeat(181) { vm.pollTelemetryFrame() }
+        assertTrue(bridge.liveBufferCalls.isEmpty())
+
+        // After warmup, a new XRun triggers +1 HW burst (192f + 96f = 288f) LIVE!
+        bridge.currentDiagnostics = bridge.currentDiagnostics.copy(xRunCount = 3)
+        repeat(60) { vm.pollTelemetryFrame() }
+        assertEquals(listOf(288), bridge.liveBufferCalls)
+        assertEquals(288, vm.uiState.value.streamDiagnostics.bufferSizeFrames)
     }
 
     private fun com.cleanroom.stadiumdsp.ui.state.StadiumUiState.selectedAmpDrive(): Float =

@@ -8,7 +8,12 @@ import com.cleanroom.stadiumdsp.DspCommandCode
 import com.cleanroom.stadiumdsp.LiveTelemetryUi
 import com.cleanroom.stadiumdsp.NativeDspBridge
 import com.cleanroom.stadiumdsp.StreamDiagnosticsUi
+import com.cleanroom.stadiumdsp.audio.AudioBufferPlanner
+import com.cleanroom.stadiumdsp.audio.AudioDeviceEnumerator
+import com.cleanroom.stadiumdsp.audio.AudioDeviceOption
 import com.cleanroom.stadiumdsp.audio.AudioDspSettings
+import com.cleanroom.stadiumdsp.audio.AudioSettingsRepository
+import com.cleanroom.stadiumdsp.audio.BufferSizeMode
 import com.cleanroom.stadiumdsp.audio.OboeSessionController
 import com.cleanroom.stadiumdsp.catalog.AmpModelCatalog
 import com.cleanroom.stadiumdsp.catalog.FactoryCabCatalog
@@ -84,6 +89,12 @@ data class StadiumUiState(
     val eqCurveDb: List<Float> = List(64) { 0f },
     val cabSpectrumDb: List<Float> = List(64) { -12f },
     val audioSettings: AudioDspSettings = AudioDspSettings(),
+    val availableInputDevices: List<AudioDeviceOption> = listOf(
+        AudioDeviceOption(id = 0, name = "System Default (Auto)", typeBadge = "AUTO", isInput = true),
+    ),
+    val availableOutputDevices: List<AudioDeviceOption> = listOf(
+        AudioDeviceOption(id = 0, name = "System Default (Auto)", typeBadge = "AUTO", isInput = false),
+    ),
     val streamDiagnostics: StreamDiagnosticsUi = StreamDiagnosticsUi(),
     val isAudioRunning: Boolean = false,
     val statusBanner: String = "Stadium DSP Ready • 48 kHz Zero-Latency",
@@ -138,6 +149,8 @@ class StadiumRigViewModel(
     private val eqScratch = FloatArray(64)
     private val cabSpectrumScratch = FloatArray(64)
     private var telemetryPollCounter = 0
+    private var lastObservedXRuns = 0
+    private var xRunGuardWarmupTicks = 0
 
     private val _telemetry = MutableStateFlow(LiveTelemetryUi())
     val telemetry: StateFlow<LiveTelemetryUi> = _telemetry.asStateFlow()
@@ -162,19 +175,57 @@ class StadiumRigViewModel(
         val snap = bridge.readTelemetry(telemetryScratch)
         _telemetry.value = snap
         telemetryPollCounter++
-        if (telemetryPollCounter % 120 == 1) {
-            val diag = bridge.getStreamDiagnostics()
-            _uiState.update { it.copy(streamDiagnostics = diag, isAudioRunning = bridge.isAudioRunning()) }
-            runCatching {
-                android.util.Log.i(
-                    "StadiumGate4Telemetry",
-                    String.format(
-                        "running=%s sr=%d burst=%df buf=%df outBufMs=%.2f mmapExcl=%s xruns=%d rtCpu=%.2f%% inPeak=%.1fdB outL=%.1fdB outR=%.1fdB snap=%d",
-                        bridge.isAudioRunning(), diag.sampleRate, diag.framesPerBurst, diag.bufferSizeFrames,
-                        diag.roundTripLatencyMs, diag.isMmapUsed, diag.xRunCount, snap.rtCpuLoadPct,
-                        snap.inPeakDb, snap.outPeakLDb, snap.outPeakRDb, snap.activeSnapshot,
-                    ),
-                )
+
+        if (telemetryPollCounter % 60 == 1) {
+            val running = bridge.isAudioRunning()
+            var diag = bridge.getStreamDiagnostics()
+
+            // Off-RT Auto XRun Guard (never blocks audio thread!): bumps +1 HW burst on new XRun after warmup
+            if (running && _uiState.value.audioSettings.autoXrunGuard) {
+                if (xRunGuardWarmupTicks < 3) {
+                    xRunGuardWarmupTicks++
+                    lastObservedXRuns = diag.xRunCount
+                } else if (diag.xRunCount > lastObservedXRuns) {
+                    lastObservedXRuns = diag.xRunCount
+                    val nextFrames = AudioBufferPlanner.computeNextXrunGuardStep(
+                        currentBufferFrames = diag.bufferSizeFrames,
+                        framesPerBurst = diag.framesPerBurst,
+                        bufferCapacityFrames = diag.bufferCapacityFrames,
+                    )
+                    if (nextFrames != null) {
+                        val applied = bridge.setLiveBufferSizeFrames(nextFrames)
+                        diag = bridge.getStreamDiagnostics()
+                        val ms = AudioBufferPlanner.framesToMs(applied, diag.sampleRate)
+                        _uiState.update {
+                            it.copy(
+                                streamDiagnostics = diag,
+                                statusBanner = String.format(
+                                    "Auto XRun Guard -> %df (%.1f ms) • XRuns: %d",
+                                    applied, ms, diag.xRunCount,
+                                ),
+                            )
+                        }
+                    }
+                }
+            } else {
+                lastObservedXRuns = diag.xRunCount
+            }
+
+            _uiState.update { it.copy(streamDiagnostics = diag, isAudioRunning = running) }
+
+            if (telemetryPollCounter % 120 == 1) {
+                runCatching {
+                    android.util.Log.i(
+                        "StadiumGate4Telemetry",
+                        String.format(
+                            "running=%s sr=%d burst=%df buf=%df/%df outBufMs=%.2f rtlMs=%.2f mmapExcl=%s xruns=%d rtCpu=%.2f%% inPeak=%.1fdB outL=%.1fdB outR=%.1fdB snap=%d",
+                            running, diag.sampleRate, diag.framesPerBurst, diag.bufferSizeFrames,
+                            diag.bufferCapacityFrames, diag.outputBufferMs, diag.roundTripLatencyMs,
+                            diag.isMmapUsed, diag.xRunCount, snap.rtCpuLoadPct,
+                            snap.inPeakDb, snap.outPeakLDb, snap.outPeakRDb, snap.activeSnapshot,
+                        ),
+                    )
+                }
             }
         }
 
@@ -193,32 +244,135 @@ class StadiumRigViewModel(
         }
     }
 
+    /**
+     * Loads persisted Audio/DSP preferences + enumerates currently connected AudioManager I/O devices.
+     */
+    fun initializeAudioEnvironment(context: Context): AudioDspSettings {
+        val inputs = AudioDeviceEnumerator.listInputDevices(context)
+        val outputs = AudioDeviceEnumerator.listOutputDevices(context)
+        val loaded = AudioSettingsRepository.load(context)
+        val resolved = loaded.copy(
+            inputDeviceId = AudioBufferPlanner.resolveAvailableDeviceId(loaded.inputDeviceId, inputs),
+            outputDeviceId = AudioBufferPlanner.resolveAvailableDeviceId(loaded.outputDeviceId, outputs),
+        )
+        _uiState.update {
+            it.copy(
+                audioSettings = resolved,
+                availableInputDevices = inputs,
+                availableOutputDevices = outputs,
+            )
+        }
+        return resolved
+    }
+
+    fun refreshAudioDevices(context: Context) {
+        val inputs = AudioDeviceEnumerator.listInputDevices(context)
+        val outputs = AudioDeviceEnumerator.listOutputDevices(context)
+        _uiState.update { st ->
+            st.copy(
+                availableInputDevices = inputs,
+                availableOutputDevices = outputs,
+                audioSettings = st.audioSettings.copy(
+                    inputDeviceId = AudioBufferPlanner.resolveAvailableDeviceId(st.audioSettings.inputDeviceId, inputs),
+                    outputDeviceId = AudioBufferPlanner.resolveAvailableDeviceId(st.audioSettings.outputDeviceId, outputs),
+                ),
+            )
+        }
+    }
+
     fun startAudioEngine(context: Context, settings: AudioDspSettings = _uiState.value.audioSettings) {
         OboeSessionController.bridge = bridge
         val ok = OboeSessionController.ensureStarted(context, settings)
         syncFullPresetToNative(_uiState.value.activePreset)
         telemetryPollCounter = 0
+        xRunGuardWarmupTicks = 0
+        val diag = bridge.getStreamDiagnostics()
+        lastObservedXRuns = diag.xRunCount
         _uiState.update {
             it.copy(
                 audioSettings = settings,
                 isAudioRunning = ok || bridge.isAudioRunning(),
-                streamDiagnostics = bridge.getStreamDiagnostics(),
-                statusBanner = if (ok) "Oboe AAudio Engine Active (48 kHz)" else "Audio Fallback Ready",
+                streamDiagnostics = diag,
+                statusBanner = if (ok) {
+                    String.format(
+                        "Oboe Active (%d Hz • %df / %.1f ms • %s)",
+                        diag.sampleRate,
+                        diag.bufferSizeFrames,
+                        diag.outputBufferMs,
+                        if (diag.isMmapUsed) "MMAP" else "AAudio",
+                    )
+                } else {
+                    "Audio Fallback Ready"
+                },
             )
         }
     }
 
+    /**
+     * Live zero-glitch buffer tuning directly from slider/chips without stopping audio.
+     */
+    fun setLiveBufferFrames(
+        context: Context,
+        targetFrames: Int,
+        mode: BufferSizeMode,
+        burstMultiplier: Int,
+    ) {
+        OboeSessionController.bridge = bridge
+        val applied = OboeSessionController.setLiveBufferFrames(context, targetFrames, mode, burstMultiplier)
+        val diag = bridge.getStreamDiagnostics()
+        lastObservedXRuns = diag.xRunCount
+        val ms = AudioBufferPlanner.framesToMs(applied, diag.sampleRate)
+        _uiState.update {
+            it.copy(
+                audioSettings = OboeSessionController.currentSettings,
+                streamDiagnostics = diag,
+                statusBanner = String.format("Live Buffer: %df (%.2f ms) • 0 ms glitch", applied, ms),
+            )
+        }
+    }
+
+    fun resetBufferToMinimum(context: Context) {
+        val diag = bridge.getStreamDiagnostics()
+        setLiveBufferFrames(
+            context = context,
+            targetFrames = diag.framesPerBurst.coerceAtLeast(16),
+            mode = BufferSizeMode.HARDWARE_BURST,
+            burstMultiplier = 1,
+        )
+    }
+
     fun restartAudioWithSettings(context: Context, settings: AudioDspSettings) {
         OboeSessionController.bridge = bridge
-        val ok = OboeSessionController.restartWithSettings(context, settings)
-        syncFullPresetToNative(_uiState.value.activePreset)
+        val prev = _uiState.value.audioSettings
+        val willRestart = !bridge.isAudioRunning() || AudioBufferPlanner.needsStreamRestart(prev, settings)
+        val ok = OboeSessionController.applySettings(context, settings)
+        if (willRestart) {
+            syncFullPresetToNative(_uiState.value.activePreset)
+            xRunGuardWarmupTicks = 0
+        }
         telemetryPollCounter = 0
+        val diag = bridge.getStreamDiagnostics()
+        lastObservedXRuns = diag.xRunCount
         _uiState.update {
             it.copy(
                 audioSettings = settings,
-                isAudioRunning = ok,
-                streamDiagnostics = bridge.getStreamDiagnostics(),
-                statusBanner = "Audio Settings Applied (${settings.burstMultiplier}x Burst)",
+                isAudioRunning = ok || bridge.isAudioRunning(),
+                streamDiagnostics = diag,
+                statusBanner = if (willRestart) {
+                    String.format(
+                        "Audio Applied (%df • %.1f ms • %s)",
+                        diag.bufferSizeFrames,
+                        diag.outputBufferMs,
+                        if (diag.isMmapUsed) "MMAP" else "Shared",
+                    )
+                } else {
+                    String.format(
+                        "Live Buffer Applied (%df / %df • %.1f ms)",
+                        diag.bufferSizeFrames,
+                        diag.bufferCapacityFrames,
+                        diag.outputBufferMs,
+                    )
+                },
             )
         }
     }

@@ -46,6 +46,7 @@ import androidx.window.core.layout.WindowHeightSizeClass
 import androidx.window.core.layout.WindowWidthSizeClass
 import com.cleanroom.stadiumdsp.LiveTelemetryUi
 import com.cleanroom.stadiumdsp.audio.AudioDspSettings
+import com.cleanroom.stadiumdsp.audio.BufferSizeMode
 import com.cleanroom.stadiumdsp.preset.SplitRoutingMode
 import com.cleanroom.stadiumdsp.ui.components.ModelBrowserAndInspector
 import com.cleanroom.stadiumdsp.ui.components.ModelBrowserPane
@@ -76,6 +77,9 @@ fun StadiumRigScreen(
     onImportExternalAsset: () -> Unit,
     onApplyAudioSettings: (AudioDspSettings) -> Unit,
     onStartAudio: () -> Unit,
+    onLiveBufferChange: (Int, BufferSizeMode, Int) -> Unit = { _, _, _ -> },
+    onResetBufferMin: () -> Unit = {},
+    onRefreshAudioDevices: () -> Unit = {},
     onDestinationChanged: (WorkspaceDestination) -> Unit = {},
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
@@ -85,6 +89,9 @@ fun StadiumRigScreen(
         onImportExternalAsset = onImportExternalAsset,
         onApplyAudioSettings = onApplyAudioSettings,
         onStartAudio = onStartAudio,
+        onLiveBufferChange = onLiveBufferChange,
+        onResetBufferMin = onResetBufferMin,
+        onRefreshAudioDevices = onRefreshAudioDevices,
         onStepPreset = viewModel::stepPreset,
         onSelectPreset = viewModel::selectPreset,
         onSaveUserPreset = viewModel::saveCurrentAsUserPreset,
@@ -141,6 +148,9 @@ fun StadiumRigAdaptiveContent(
     onImportExternalAsset: () -> Unit,
     onApplyAudioSettings: (AudioDspSettings) -> Unit,
     onStartAudio: () -> Unit,
+    onLiveBufferChange: (Int, BufferSizeMode, Int) -> Unit = { _, _, _ -> },
+    onResetBufferMin: () -> Unit = {},
+    onRefreshAudioDevices: () -> Unit = {},
     onStepPreset: (Int) -> Unit,
     onSelectPreset: (String) -> Unit,
     onSaveUserPreset: (String) -> Unit,
@@ -274,6 +284,9 @@ fun StadiumRigAdaptiveContent(
                             onTapTempo = onTapTempo, onUndo = onUndo, onRedo = onRedo,
                             onToggleCompareAB = onToggleCompareAB, onCopyAB = onCopyAB,
                             onApplyAudioSettings = onApplyAudioSettings, onStartAudio = onStartAudio,
+                            onLiveBufferChange = onLiveBufferChange,
+                            onResetBufferMin = onResetBufferMin,
+                            onRefreshAudioDevices = onRefreshAudioDevices,
                         )
                         SignalFlowCanvas(
                             flow = state.activePreset.signalFlow, selectedBlockId = state.selectedBlockId,
@@ -340,6 +353,9 @@ fun StadiumRigAdaptiveContent(
                         onCopyAB = onCopyAB,
                         onApplyAudioSettings = onApplyAudioSettings,
                         onStartAudio = onStartAudio,
+                        onLiveBufferChange = onLiveBufferChange,
+                        onResetBufferMin = onResetBufferMin,
+                        onRefreshAudioDevices = onRefreshAudioDevices,
                     )
 
                     when (destination) {
