@@ -47,6 +47,9 @@ object OboeSessionController {
     fun ensureStarted(context: Context, settings: AudioDspSettings = currentSettings): Boolean {
         currentSettings = settings
         if (bridge.isAudioRunning()) return true
+        // Start ForegroundService BEFORE spawning high-priority Oboe RT thread so main Looper
+        // finishes Service.onCreate() + startForeground() with zero CPU starvation / 0 ANR.
+        StadiumAudioForegroundService.start(context)
         val ok = bridge.startAudio(
             enableInput = settings.enableMicrophoneInput,
             inputDeviceId = settings.inputDeviceId,
@@ -55,8 +58,8 @@ object OboeSessionController {
             requestedBufferFrames = effectiveRequestedFrames(settings),
             autoXrunGuard = settings.autoXrunGuard,
         )
-        if (ok) {
-            StadiumAudioForegroundService.start(context)
+        if (!ok) {
+            StadiumAudioForegroundService.stop(context)
         }
         return ok
     }

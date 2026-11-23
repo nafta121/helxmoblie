@@ -163,6 +163,12 @@ class StudioDragDropController {
     }
 }
 
+/**
+ * Plain non-snapshot coordinate holder used inside onGloballyPositioned so layout passes
+ * never trigger unnecessary Compose recompositions.
+ */
+class OffsetHolder(var value: Offset = Offset.Zero)
+
 val LocalStudioDragDropController = compositionLocalOf<StudioDragDropController?> { null }
 
 /**
@@ -175,7 +181,7 @@ fun StudioDragDropHost(
     modifier: Modifier = Modifier,
     content: @Composable () -> Unit,
 ) {
-    var hostOriginInRoot by remember { mutableStateOf(Offset.Zero) }
+    val hostOriginInRoot = remember { OffsetHolder() }
     val density = LocalDensity.current
 
     CompositionLocalProvider(LocalStudioDragDropController provides controller) {
@@ -183,7 +189,7 @@ fun StudioDragDropHost(
             modifier = modifier
                 .fillMaxSize()
                 .onGloballyPositioned { coords ->
-                    hostOriginInRoot = coords.positionInRoot()
+                    hostOriginInRoot.value = coords.positionInRoot()
                 },
         ) {
             content()
@@ -191,7 +197,7 @@ fun StudioDragDropHost(
             val payload = controller.activePayload
             if (payload != null) {
                 val catColor = payload.category.composeColor()
-                val localOffset = controller.pointerInRoot - hostOriginInRoot
+                val localOffset = controller.pointerInRoot - hostOriginInRoot.value
                 val ghostWidthPx = with(density) { 104.dp.toPx() }
                 val ghostHeightPx = with(density) { 54.dp.toPx() }
                 val targetLabel = when (val t = controller.hoveredTarget) {

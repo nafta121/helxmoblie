@@ -107,13 +107,20 @@ echo "=== [4/5] Testing Adaptive Postures & 0-ms Rotation Continuity (Phone -> L
 "$ADB" -s emulator-5554 shell settings put system accelerometer_rotation 0
 "$ADB" -s emulator-5554 shell settings put system user_rotation 1
 sleep 6
-# Tablet Landscape size simulation (1920x1200)
+# Tablet Landscape size simulation (1920x1200, 240dpi) — matches Helix Stadium Native Studio aspect ratio
 "$ADB" -s emulator-5554 shell wm size 1920x1200
-sleep 6
+"$ADB" -s emulator-5554 shell wm density 240
+sleep 14
+"$ADB" -s emulator-5554 exec-out screencap -p > /tmp/gate4_tablet_open.png || true
+# Tap empty black Signal Flow area to verify auto-close of Model Browser!
+"$ADB" -s emulator-5554 shell input tap 960 175
+sleep 4
+"$ADB" -s emulator-5554 exec-out screencap -p > /tmp/gate4_tablet_closed.png || true
 # Back to Phone Portrait default
+"$ADB" -s emulator-5554 shell wm density reset
 "$ADB" -s emulator-5554 shell wm size reset
 "$ADB" -s emulator-5554 shell settings put system user_rotation 0
-sleep 6
+sleep 8
 
 APP_PID_AFTER=$("$ADB" -s emulator-5554 shell pidof "$PKG" | tr -d '\r' || echo "")
 echo "App PID (After Rotation & Resize): ${APP_PID_AFTER:-NONE}"

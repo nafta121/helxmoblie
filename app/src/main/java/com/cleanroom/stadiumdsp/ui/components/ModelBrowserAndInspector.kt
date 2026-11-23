@@ -539,7 +539,7 @@ private fun HardwareModelGridCard(
     onDropPayload: (StudioDragPayload, StudioDropTarget) -> Unit,
 ) {
     val dragController = LocalStudioDragDropController.current
-    var cardOriginInRoot by remember { mutableStateOf(Offset.Zero) }
+    val cardOriginInRoot = remember { OffsetHolder() }
     val latestEntry by rememberUpdatedState(entry)
     val latestOnTap by rememberUpdatedState(onTap)
     val latestOnDrop by rememberUpdatedState(onDropPayload)
@@ -547,7 +547,7 @@ private fun HardwareModelGridCard(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .onGloballyPositioned { cardOriginInRoot = it.positionInRoot() }
+            .onGloballyPositioned { cardOriginInRoot.value = it.positionInRoot() }
             .clip(RoundedCornerShape(7.dp))
             .background(
                 if (isLoaded) accentColor.copy(alpha = 0.34f) else Color(0xFF19191D)
@@ -575,12 +575,12 @@ private fun HardwareModelGridCard(
                                 shortLabel = e.shortLabel,
                                 isPreamp = e.isPreamp,
                             ),
-                            startRootOffset = cardOriginInRoot + startLocal,
+                            startRootOffset = cardOriginInRoot.value + startLocal,
                         )
                     },
                     onDrag = { change, _ ->
                         change.consume()
-                        dragController.updateDrag(cardOriginInRoot + change.position)
+                        dragController.updateDrag(cardOriginInRoot.value + change.position)
                     },
                     onDragEnd = { dragController.endDrag(latestOnDrop) },
                     onDragCancel = { dragController.cancelDrag() },
@@ -623,7 +623,7 @@ private fun HardwareModelListRow(
     onDropPayload: (StudioDragPayload, StudioDropTarget) -> Unit,
 ) {
     val dragController = LocalStudioDragDropController.current
-    var rowOriginInRoot by remember { mutableStateOf(Offset.Zero) }
+    val rowOriginInRoot = remember { OffsetHolder() }
     val latestEntry by rememberUpdatedState(entry)
     val latestOnTap by rememberUpdatedState(onTap)
     val latestOnDrop by rememberUpdatedState(onDropPayload)
@@ -631,7 +631,7 @@ private fun HardwareModelListRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .onGloballyPositioned { rowOriginInRoot = it.positionInRoot() }
+            .onGloballyPositioned { rowOriginInRoot.value = it.positionInRoot() }
             .clip(RoundedCornerShape(5.dp))
             .background(if (isLoaded) accentColor.copy(alpha = 0.28f) else Color(0xFF19191D))
             .border(1.dp, if (isLoaded) accentColor else Color(0xFF232328), RoundedCornerShape(5.dp))
@@ -652,12 +652,12 @@ private fun HardwareModelListRow(
                                 shortLabel = e.shortLabel,
                                 isPreamp = e.isPreamp,
                             ),
-                            startRootOffset = rowOriginInRoot + startLocal,
+                            startRootOffset = rowOriginInRoot.value + startLocal,
                         )
                     },
                     onDrag = { change, _ ->
                         change.consume()
-                        dragController.updateDrag(rowOriginInRoot + change.position)
+                        dragController.updateDrag(rowOriginInRoot.value + change.position)
                     },
                     onDragEnd = { dragController.endDrag(latestOnDrop) },
                     onDragCancel = { dragController.cancelDrag() },

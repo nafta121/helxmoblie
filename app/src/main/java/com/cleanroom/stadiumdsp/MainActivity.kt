@@ -87,8 +87,8 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                // Start Oboe audio engine AFTER the first Compose frame commits so the main Looper
-                // is guaranteed responsive for StadiumAudioForegroundService.startForeground() (0 ANR).
+                // Start ForegroundService cleanly on idle main Looper right after first Compose frame,
+                // then launch Oboe RT audio on Dispatchers.IO (guarantees 0 ANR even on low-end / TCG CPUs).
                 LaunchedEffect(Unit) {
                     withFrameNanos { }
                     val saved = withContext(Dispatchers.IO) {
@@ -99,6 +99,8 @@ class MainActivity : ComponentActivity() {
                         Manifest.permission.RECORD_AUDIO,
                     ) == PackageManager.PERMISSION_GRANTED
                     if (hasMic) {
+                        com.cleanroom.stadiumdsp.audio.StadiumAudioForegroundService.start(applicationContext)
+                        delay(250L)
                         withContext(Dispatchers.IO) {
                             rigViewModel.startAudioEngine(applicationContext, saved)
                         }

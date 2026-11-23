@@ -642,7 +642,7 @@ private fun SignalFlowSquareBlock(
     val isBeingDragged = (dragController?.activePayload as? StudioDragPayload.MoveExistingBlock)?.blockId == block.id
     val isDropHovered = (dragController?.hoveredTarget as? StudioDropTarget.ReplaceBlock)?.blockId == block.id
 
-    var originInRoot by remember { mutableStateOf(Offset.Zero) }
+    val originInRoot = remember { OffsetHolder() }
     val latestBlock by rememberUpdatedState(block)
     val latestOnSelect by rememberUpdatedState(onSelect)
     val latestOnToggleBypass by rememberUpdatedState(onToggleBypass)
@@ -676,7 +676,7 @@ private fun SignalFlowSquareBlock(
                 .size(blockSize)
                 .alpha(if (isBeingDragged) 0.35f else if (block.enabled) 1f else 0.45f)
                 .onGloballyPositioned { coords ->
-                    originInRoot = coords.positionInRoot()
+                    originInRoot.value = coords.positionInRoot()
                     dragController?.registerDropZone(
                         key = zoneKey,
                         target = StudioDropTarget.ReplaceBlock(block.id),
@@ -705,12 +705,12 @@ private fun SignalFlowSquareBlock(
                                     modelId = b.modelId,
                                     shortLabel = b.shortLabel,
                                 ),
-                                startRootOffset = originInRoot + startLocal,
+                                startRootOffset = originInRoot.value + startLocal,
                             )
                         },
                         onDrag = { change, _ ->
                             change.consume()
-                            dragController.updateDrag(originInRoot + change.position)
+                            dragController.updateDrag(originInRoot.value + change.position)
                         },
                         onDragEnd = { dragController.endDrag(latestOnDrop) },
                         onDragCancel = { dragController.cancelDrag() },
