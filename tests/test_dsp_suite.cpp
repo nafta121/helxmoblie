@@ -1475,6 +1475,172 @@ void Test18_PresetClipPlayerAnd12FactoryCabs() {
     Check(all_12_cabs_ok, "All 12 Factory Guitar/Bass Cabs must generate valid finite IRs");
 }
 
+void Test19_MultiInstanceEffectStacking() {
+    std::printf("\n=== [Test 19] Multi-Instance Effect Stacking (2x Drive, 2x Delay, 2x Reverb, 2x EQ, 2x Vol/Pan) ===\n");
+    using namespace stadium_dsp;
+
+    StadiumSignalChainProcessor proc;
+    DualPathRoutingPlan plan;
+    // Path 1A: Drive[0] -> Drive[1] -> Amp[0] -> Cab -> EQ[0] -> Delay[0] -> Delay[1] -> Reverb[0]
+    plan.path_1a[0] = {RigBlockType::kDrive, 0};
+    plan.path_1a[1] = {RigBlockType::kDrive, 1};
+    plan.path_1a[2] = {RigBlockType::kAmp, 0};
+    plan.path_1a[3] = {RigBlockType::kCab, 0};
+    plan.path_1a[4] = {RigBlockType::kEq, 0};
+    plan.path_1a[5] = {RigBlockType::kDelay, 0};
+    plan.path_1a[6] = {RigBlockType::kDelay, 1};
+    plan.path_1a[7] = {RigBlockType::kReverb, 0};
+    plan.count_1a = 8;
+    plan.split_1_after_index = 8;
+    // Path 2A: EQ[1] -> Reverb[1] -> VolPan[1]
+    plan.path_2a[0] = {RigBlockType::kEq, 1};
+    plan.path_2a[1] = {RigBlockType::kReverb, 1};
+    plan.path_2a[2] = {RigBlockType::kVolPan, 1};
+    plan.count_2a = 3;
+    plan.split_2_after_index = 3;
+    plan.merge_2_at_index = 3;
+    plan.path_1a_feeds_2a = true;
+    proc.SetDualPathRouting(plan);
+
+    // Enable instance 0 AND instance 1 with distinct models & settings via flags = instance_idx
+    proc.EnqueueCommand({DspCommandType::kSetDriveFuzz, 0, 0, 0, 0, 0, 0, 1});
+    proc.EnqueueCommand({DspCommandType::kSetDriveFuzz, 0, 1, 0, 0, 0, 0, 3});  // Minotaur
+    proc.EnqueueCommand({DspCommandType::kSetDriveFuzz, 0, 0, 1, 0, 0, 0, 1});
+    proc.EnqueueCommand({DspCommandType::kSetDriveFuzz, 0, 1, 1, 0, 0, 0, 0});  // Scream 808
+    proc.EnqueueCommand({DspCommandType::kSetDelayReverb, 0, 0, 0, 0, 0, 0, 1});
+    proc.EnqueueCommand({DspCommandType::kSetDelayReverb, 0, 2, 0, 60.0f, 0.35f, 0.35f, 0});
+    proc.EnqueueCommand({DspCommandType::kSetDelayReverb, 0, 0, 1, 0, 0, 0, 1});
+    proc.EnqueueCommand({DspCommandType::kSetDelayReverb, 0, 2, 1, 110.0f, 0.40f, 0.35f, 0});
+    proc.EnqueueCommand({DspCommandType::kSetDelayReverb, 1, 0, 0, 0, 0, 0, 1});
+    proc.EnqueueCommand({DspCommandType::kSetDelayReverb, 1, 2, 0, 0.6f, 6500.0f, 0.30f, 0});
+    proc.EnqueueCommand({DspCommandType::kSetDelayReverb, 1, 0, 1, 0, 0, 0, 1});
+    proc.EnqueueCommand({DspCommandType::kSetDelayReverb, 1, 2, 1, 0.75f, 5500.0f, 0.30f, 0});
+    proc.EnqueueCommand({DspCommandType::kSetEqParam, 0, 0, 0, 0, 0, 0, 1});
+    proc.EnqueueCommand({DspCommandType::kSetEqParam, 0, 0, 1, 0, 0, 0, 1});
+    proc.EnqueueCommand({DspCommandType::kSetVolumePan, 0, 0, 1, 0, 0, 0, 1});
+    proc.EnqueueCommand({DspCommandType::kSetVolumePan, 0, 1, 1, 0.90f, 0.0f, 1.0f, 1});
+
+    std::vector<float> in(9600, 0.0f);
+    for (size_t i = 0; i < 2400; ++i) {
+        in[i] = 0.25f * std::sin(2.0f * kPi * 330.0f * static_cast<float>(i) / 48000.0f);
+    }
+    std::vector<float> out_l(9600, 0.0f), out_r(9600, 0.0f);
+    proc.ProcessAudioBurst(in.data(), out_l.data(), out_r.data(), in.size());
+
+    // Measure tail at 110 ms..160 ms (delay[1] + reverb[0] + reverb[1])
+    double tail_e = 0.0;
+    bool all_finite = true;
+    for (size_t i = 0; i < out_l.size(); ++i) {
+        if (!std::isfinite(out_l[i]) || !std::isfinite(out_r[i])) all_finite = false;
+        if (i >= 5200 && i < 8400) {
+            tail_e += static_cast<double>(out_l[i]) * out_l[i] + static_cast<double>(out_r[i]) * out_r[i];
+        }
+    }
+    const double tail_rms = std::sqrt(tail_e / (2.0 * 3200.0));
+
+    // Verify instance 1 VolPan independently attenuates output when pulled to 0.0
+    proc.EnqueueCommand({DspCommandType::kSetVolumePan, 0, 1, 1, 0.0f, 0.0f, 1.0f, 1});
+    std::vector<float> zero_l(960, 0.0f), zero_r(960, 0.0f);
+    proc.ProcessAudioBurst(in.data(), zero_l.data(), zero_r.data(), 960);
+    double muted_e = 0.0;
+    for (size_t i = 480; i < 960; ++i) muted_e += static_cast<double>(zero_l[i]) * zero_l[i];
+    const double muted_rms = std::sqrt(muted_e / 480.0);
+
+    std::printf("  Stacked 2x FX Tail RMS: %.4f | VolPan[1]=0 Tail RMS: %.6f | Finite: %s\n",
+                tail_rms, muted_rms, all_finite ? "YES" : "NO");
+    Check(all_finite, "Multi-instance stacked DSP output must remain 100% finite");
+    Check(tail_rms > 0.01, "Dual stacked Delays + Reverbs must emit rich wet tails");
+    Check(muted_rms < 1e-4, "Instance 1 VolPan at 0% must independently silence Path 2 output");
+}
+
+void Test20_DualPath4BranchSpaceCadetRoutingAndCpuBudget() {
+    std::printf("\n=== [Test 20] Full 4-Branch Space Cadet Topology (1A/1B -> 2A/2B) & RT CPU Budget ===\n");
+    using namespace stadium_dsp;
+
+    StadiumSignalChainProcessor proc;
+    // Exact Space Cadet topology from reference:
+    // Path 1A: Drive[0] -> Mod[0] -> Amp[0] (Essex A30) -> Cab -> [Split 1] -> Delay[0] -> (feeds Path 2A)
+    // Path 1B: Delay[1] -> Reverb[0] -> VolPan[0] -> (Direct Out)
+    // Path 2A: EQ[0] -> Mod[1] -> [Split 2] -> Reverb[1] -> [Merge 2] -> EQ[1] -> VolPan[1] -> (Final Out)
+    // Path 2B: Comp[1] (parallel ambient sustain branch) -> (merges into Merge 2)
+    DualPathRoutingPlan plan;
+    plan.path_1a[0] = {RigBlockType::kDrive, 0};
+    plan.path_1a[1] = {RigBlockType::kModPre, 0};
+    plan.path_1a[2] = {RigBlockType::kAmp, 0};
+    plan.path_1a[3] = {RigBlockType::kCab, 0};
+    plan.path_1a[4] = {RigBlockType::kDelay, 0};
+    plan.count_1a = 5;
+    plan.split_1_after_index = 4;
+    plan.merge_1b_into_1a = false;
+    plan.path_1a_feeds_2a = true;
+
+    plan.path_1b[0] = {RigBlockType::kDelay, 1};
+    plan.path_1b[1] = {RigBlockType::kReverb, 0};
+    plan.path_1b[2] = {RigBlockType::kVolPan, 0};
+    plan.count_1b = 3;
+
+    plan.path_2a[0] = {RigBlockType::kEq, 0};
+    plan.path_2a[1] = {RigBlockType::kModPost, 1};
+    plan.path_2a[2] = {RigBlockType::kReverb, 1};
+    plan.path_2a[3] = {RigBlockType::kEq, 1};
+    plan.path_2a[4] = {RigBlockType::kVolPan, 1};
+    plan.count_2a = 5;
+    plan.split_2_after_index = 2;
+    plan.merge_2_at_index = 3;
+
+    plan.path_2b[0] = {RigBlockType::kComp, 1};
+    plan.count_2b = 1;
+
+    proc.SetParallelSplitMerge(SplitMode::kSplitY, 400.0f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f, false);
+    proc.SetSecondaryParallelSplitMerge(SplitMode::kSplitY, 400.0f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f, false);
+    proc.SetDualPathRouting(plan);
+
+    proc.EnqueueCommand({DspCommandType::kSetAmpModel, 0, 0, 0, 0, 0, 0, 6});  // Essex A30
+    proc.EnqueueCommand({DspCommandType::kSetDriveFuzz, 0, 0, 0, 0, 0, 0, 1});
+    proc.EnqueueCommand({DspCommandType::kSetModulation, 0, 0, 0, 0, 0, 0, 1});
+    proc.EnqueueCommand({DspCommandType::kSetModulation, 1, 0, 1, 0, 0, 0, 1});
+    proc.EnqueueCommand({DspCommandType::kSetDelayReverb, 0, 0, 0, 0, 0, 0, 1});
+    proc.EnqueueCommand({DspCommandType::kSetDelayReverb, 0, 0, 1, 0, 0, 0, 1});
+    proc.EnqueueCommand({DspCommandType::kSetDelayReverb, 1, 0, 0, 0, 0, 0, 1});
+    proc.EnqueueCommand({DspCommandType::kSetDelayReverb, 1, 0, 1, 0, 0, 0, 1});
+    proc.EnqueueCommand({DspCommandType::kSetEqParam, 0, 0, 0, 0, 0, 0, 1});
+    proc.EnqueueCommand({DspCommandType::kSetEqParam, 0, 0, 1, 0, 0, 0, 1});
+    proc.EnqueueCommand({DspCommandType::kSetVolumePan, 0, 0, 0, 0, 0, 0, 1});
+    proc.EnqueueCommand({DspCommandType::kSetVolumePan, 0, 0, 1, 0, 0, 0, 1});
+    proc.EnqueueCommand({DspCommandType::kSetDynamics, 1, 0, 1, 0, 0, 0, 1});
+
+    alignas(64) float in96[96];
+    alignas(64) float out_l96[96];
+    alignas(64) float out_r96[96];
+    for (int i = 0; i < 96; ++i) {
+        in96[i] = 0.22f * std::sin(2.0f * kPi * 220.0f * static_cast<float>(i) / 48000.0f);
+    }
+
+    // Warmup
+    for (int w = 0; w < 50; ++w) proc.ProcessAudioBurst(in96, out_l96, out_r96, 96);
+
+    const auto t0 = std::chrono::steady_clock::now();
+    constexpr int kIters = 500;
+    double out_e = 0.0;
+    bool all_finite = true;
+    for (int it = 0; it < kIters; ++it) {
+        proc.ProcessAudioBurst(in96, out_l96, out_r96, 96);
+        for (int i = 0; i < 96; ++i) {
+            if (!std::isfinite(out_l96[i]) || !std::isfinite(out_r96[i])) all_finite = false;
+            out_e += static_cast<double>(out_l96[i]) * out_l96[i];
+        }
+    }
+    const auto t1 = std::chrono::steady_clock::now();
+    const double avg_us = std::chrono::duration<double, std::micro>(t1 - t0).count() / static_cast<double>(kIters);
+    const double rt_pct = 100.0 * avg_us / 2000.0;  // 96 samples @ 48 kHz = 2000 us
+    const double rms = std::sqrt(out_e / static_cast<double>(kIters * 96));
+
+    std::printf("  Space Cadet 14-Block 4-Branch Avg (96f): %.1f us (%.2f%% RT budget) | RMS: %.4f | Finite: %s\n",
+                avg_us, rt_pct, rms, all_finite ? "YES" : "NO");
+    Check(all_finite && rms > 0.01, "4-branch Space Cadet dual-path routing must output finite active stereo signal");
+    Check(rt_pct < 45.0, "14-block dual-path Space Cadet rig must stay well below 45% RT CPU budget");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1500,9 +1666,11 @@ int main(int argc, char** argv) {
     Test16_TunerBpmVolumePanLooper();
     Test17_DynamicRoutingParallelSplitMergeMuteTelemetrySnapshots();
     Test18_PresetClipPlayerAnd12FactoryCabs();
+    Test19_MultiInstanceEffectStacking();
+    Test20_DualPath4BranchSpaceCadetRoutingAndCpuBudget();
 
     if (g_failures == 0) {
-        std::printf("\n[ALL TESTS PASSED] 0 failures across all 18 DSP & Kirchhoff circuit verification suites!\n");
+        std::printf("\n[ALL TESTS PASSED] 0 failures across all 20 DSP & Kirchhoff circuit verification suites!\n");
         return 0;
     }
     std::fprintf(stderr, "\n[FAILED] %d assertions failed.\n", g_failures);

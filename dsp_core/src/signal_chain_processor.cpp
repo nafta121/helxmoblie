@@ -8,23 +8,46 @@ namespace stadium_dsp {
 
 float GuitarRigGraph::ResolveAutoInputImpedanceOhms() const noexcept {
     if (!auto_z_enabled) return manual_input_z_ohms;
-    // Scan active blocks in dynamic slot order and adopt the input impedance of the FIRST enabled block!
-    for (RigBlockType blk : slot_order) {
+    auto check_slot = [this](RigBlockType blk, int idx) -> float {
         switch (blk) {
-            case RigBlockType::kWah:
-                if (wah.GetParams().enabled) return GetWahAutoZOhms(wah.GetParams().model);
+            case RigBlockType::kWah: {
+                const auto& w = (idx & 1) ? wah_2 : wah;
+                if (w.GetParams().enabled) return GetWahAutoZOhms(w.GetParams().model);
                 break;
-            case RigBlockType::kDrive:
-                if (drive.GetParams().enabled) return GetDriveAutoZOhms(drive.GetParams().model);
+            }
+            case RigBlockType::kDrive: {
+                const auto& d = (idx & 1) ? drive_2 : drive;
+                if (d.GetParams().enabled) return GetDriveAutoZOhms(d.GetParams().model);
                 break;
+            }
             case RigBlockType::kModPre:
-                if (mod_pre.GetParams().enabled) return GetModAutoZOhms(mod_pre.GetParams().model);
+            case RigBlockType::kModPost: {
+                const auto& m = (idx & 1) ? mod_post : mod_pre;
+                if (m.GetParams().enabled) return GetModAutoZOhms(m.GetParams().model);
                 break;
-            case RigBlockType::kAmp:
-                return GetAmpRecipe(amp.GetModel()).input_z_ohms;
+            }
+            case RigBlockType::kAmp: {
+                const auto& a = (idx & 1) ? amp_2 : amp;
+                return GetAmpRecipe(a.GetModel()).input_z_ohms;
+            }
             default:
                 break;
         }
+        return -1.0f;
+    };
+
+    if (use_dual_path_plan) {
+        for (uint8_t i = 0; i < dual_path_plan.count_1a && i < DualPathRoutingPlan::kMaxSlotsPerBranch; ++i) {
+            const float z = check_slot(dual_path_plan.path_1a[i].type, dual_path_plan.path_1a[i].instance_idx);
+            if (z > 0.0f) return z;
+        }
+        return 1000000.0f;
+    }
+
+    // Legacy 12-slot scan (Tests 1-18 backwards-compatible)
+    for (RigBlockType blk : slot_order) {
+        const float z = check_slot(blk, 0);
+        if (z > 0.0f) return z;
     }
     return 1000000.0f;
 }
@@ -36,29 +59,257 @@ void GuitarRigGraph::RefreshAutoZ() noexcept {
 
 void GuitarRigGraph::SyncAmpCabImpedance() noexcept {
     amp.SetReactiveCabImpedance(cab.GetActiveImpedance());
+    amp_2.SetReactiveCabImpedance(cab.GetActiveImpedance());
 }
 
 void GuitarRigGraph::ResetAll() noexcept {
     auto_z.Reset();
-    gate.Reset();
+    gate.Reset(); gate_2.Reset();
     pitch.Reset();
-    comp.Reset();
-    wah.Reset();
-    drive.Reset();
-    mod_pre.Reset();
-    amp.Reset();
+    comp.Reset(); comp_2.Reset();
+    wah.Reset(); wah_2.Reset();
+    drive.Reset(); drive_2.Reset();
+    mod_pre.Reset(); mod_post.Reset();
+    amp.Reset(); amp_2.Reset();
     clone.ResetState();
     cab.Reset();
-    eq.Reset();
-    vol_pan.Reset();
-    mod_post.Reset();
-    delay.Reset();
-    reverb.Reset();
-    split_merge.Reset();
+    eq.Reset(); eq_2.Reset();
+    vol_pan.Reset(); vol_pan_2.Reset();
+    delay.Reset(); delay_2.Reset();
+    reverb.Reset(); reverb_2.Reset();
+    split_merge.Reset(); split_merge_2.Reset();
+}
+
+void GuitarRigGraph::ProcessSlotBlock16(RoutingSlotRef slot, float* buf_l, float* buf_r,
+                                        bool& is_stereo_signal, bool& stereo_collapsed) noexcept {
+    const int inst = slot.instance_idx & 1;
+    auto process_mono_block = [&](auto&& fn) {
+        if (is_stereo_signal) {
+            stereo_collapsed = true;
+            for (size_t i = 0; i < kSubBlockSize; ++i) buf_l[i] = 0.5f * (buf_l[i] + buf_r[i]);
+        }
+        fn(buf_l, buf_l);
+        std::memcpy(buf_r, buf_l, kSubBlockSize * sizeof(float));
+        is_stereo_signal = false;
+    };
+
+    switch (slot.type) {
+        case RigBlockType::kGate: {
+            auto& g = GateAt(inst);
+            if (!g.GetParams().enabled) return;
+            process_mono_block([&](const float* in, float* out) { g.ProcessSubBlock16(in, out); });
+            break;
+        }
+        case RigBlockType::kPitch: {
+            if (!pitch.GetParams().enabled) return;
+            process_mono_block([&](const float* in, float* out) { pitch.ProcessSubBlock16(in, out); });
+            break;
+        }
+        case RigBlockType::kComp: {
+            auto& c = CompAt(inst);
+            if (!c.GetParams().enabled) return;
+            process_mono_block([&](const float* in, float* out) { c.ProcessSubBlock16(in, out); });
+            break;
+        }
+        case RigBlockType::kWah: {
+            auto& w = WahAt(inst);
+            if (!w.GetParams().enabled) return;
+            process_mono_block([&](const float* in, float* out) { w.ProcessSubBlock16(in, out); });
+            break;
+        }
+        case RigBlockType::kDrive: {
+            auto& d = DriveAt(inst);
+            if (!d.GetParams().enabled) return;
+            process_mono_block([&](const float* in, float* out) { d.ProcessSubBlock16(in, out); });
+            break;
+        }
+        case RigBlockType::kModPre:
+        case RigBlockType::kModPost: {
+            const int mod_idx = (slot.type == RigBlockType::kModPost) ? 1 : inst;
+            auto& m = ModAt(mod_idx);
+            if (!m.GetParams().enabled) return;
+            if (!m.GetParams().is_stereo && is_stereo_signal) stereo_collapsed = true;
+            m.ProcessSubBlock16(buf_l, buf_r, buf_l, buf_r);
+            if (m.GetParams().is_stereo) is_stereo_signal = true;
+            break;
+        }
+        case RigBlockType::kAmp: {
+            process_mono_block([&](const float* in, float* out) {
+                if (inst == 0 && routing_mode != RigRoutingMode::kAgouraAmpAndCab) {
+                    clone.ProcessSubBlock16(in, out);
+                } else {
+                    AmpAt(inst).ProcessSubBlock16(in, out);
+                }
+            });
+            break;
+        }
+        case RigBlockType::kCab: {
+            if (routing_mode != RigRoutingMode::kNeuralFullRigNoCab) {
+                cab.ProcessSubBlock16(buf_l, buf_l, buf_r);
+                is_stereo_signal = true;
+            }
+            break;
+        }
+        case RigBlockType::kEq: {
+            auto& e = EqAt(inst);
+            if (!e.GetParams().enabled) return;
+            if (!e.GetParams().is_stereo && is_stereo_signal) stereo_collapsed = true;
+            e.ProcessSubBlock16(buf_l, buf_r, buf_l, buf_r);
+            break;
+        }
+        case RigBlockType::kVolPan: {
+            auto& v = VolPanAt(inst);
+            if (!v.GetParams().enabled) return;
+            v.ProcessSubBlock16(buf_l, buf_r, buf_l, buf_r);
+            is_stereo_signal = true;
+            break;
+        }
+        case RigBlockType::kDelay: {
+            auto& dl = DelayAt(inst);
+            if (!dl.GetParams().enabled) return;
+            if (!dl.GetParams().is_stereo && is_stereo_signal) stereo_collapsed = true;
+            dl.ProcessSubBlock16(buf_l, buf_r, buf_l, buf_r);
+            if (dl.GetParams().is_stereo) is_stereo_signal = true;
+            break;
+        }
+        case RigBlockType::kReverb: {
+            auto& rv = ReverbAt(inst);
+            if (!rv.GetParams().enabled) return;
+            if (!rv.GetParams().is_stereo && is_stereo_signal) stereo_collapsed = true;
+            rv.ProcessSubBlock16(buf_l, buf_r, buf_l, buf_r);
+            if (rv.GetParams().is_stereo) is_stereo_signal = true;
+            break;
+        }
+        default:
+            break;
+    }
+}
+
+void GuitarRigGraph::ProcessDualPathSubBlock16(const float* in_mono16, float* out_l16, float* out_r16,
+                                               bool* out_stereo_collapsed) noexcept {
+    alignas(64) float dry_l[kSubBlockSize];
+    alignas(64) float p1a_l[kSubBlockSize];
+    alignas(64) float p1a_r[kSubBlockSize];
+    alignas(64) float p1b_l[kSubBlockSize] = {};
+    alignas(64) float p1b_r[kSubBlockSize] = {};
+    alignas(64) float p2a_l[kSubBlockSize];
+    alignas(64) float p2a_r[kSubBlockSize];
+    alignas(64) float p2b_l[kSubBlockSize] = {};
+    alignas(64) float p2b_r[kSubBlockSize] = {};
+
+    const float in_gain = DbToLin(Clamp(input_trim_db, -120.0f, 18.0f));
+    for (size_t i = 0; i < kSubBlockSize; ++i) {
+        dry_l[i] = in_mono16[i] * in_gain;
+    }
+    auto_z.ProcessSubBlock16(dry_l, dry_l);
+    std::memcpy(p1a_l, dry_l, sizeof(dry_l));
+    std::memcpy(p1a_r, dry_l, sizeof(dry_l));
+
+    const auto& plan = dual_path_plan;
+    const uint8_t c1a = std::min<uint8_t>(plan.count_1a, DualPathRoutingPlan::kMaxSlotsPerBranch);
+    const uint8_t c1b = std::min<uint8_t>(plan.count_1b, DualPathRoutingPlan::kMaxSlotsPerBranch);
+    const uint8_t c2a = std::min<uint8_t>(plan.count_2a, DualPathRoutingPlan::kMaxSlotsPerBranch);
+    const uint8_t c2b = std::min<uint8_t>(plan.count_2b, DualPathRoutingPlan::kMaxSlotsPerBranch);
+
+    bool stereo_1a = false;
+    bool stereo_collapsed = false;
+    bool has_direct_1b = false;
+
+    const uint8_t s1 = std::min<uint8_t>(plan.split_1_after_index, c1a);
+    for (uint8_t i = 0; i < s1; ++i) {
+        ProcessSlotBlock16(plan.path_1a[i], p1a_l, p1a_r, stereo_1a, stereo_collapsed);
+    }
+
+    if (c1b > 0) {
+        split_merge.SplitStereo16(p1a_l, p1a_r, p1a_l, p1a_r, p1b_l, p1b_r);
+        bool stereo_1b = stereo_1a;
+        for (uint8_t i = s1; i < c1a; ++i) {
+            ProcessSlotBlock16(plan.path_1a[i], p1a_l, p1a_r, stereo_1a, stereo_collapsed);
+        }
+        for (uint8_t i = 0; i < c1b; ++i) {
+            ProcessSlotBlock16(plan.path_1b[i], p1b_l, p1b_r, stereo_1b, stereo_collapsed);
+        }
+        if (plan.merge_1b_into_1a) {
+            split_merge.MergeStereo16(p1a_l, p1a_r, p1b_l, p1b_r, p1a_l, p1a_r);
+            stereo_1a = true;
+        } else {
+            has_direct_1b = true;
+        }
+    } else {
+        for (uint8_t i = s1; i < c1a; ++i) {
+            ProcessSlotBlock16(plan.path_1a[i], p1a_l, p1a_r, stereo_1a, stereo_collapsed);
+        }
+    }
+
+    float* final_l = p1a_l;
+    float* final_r = p1a_r;
+
+    if (c2a > 0 || c2b > 0) {
+        if (plan.path_1a_feeds_2a) {
+            std::memcpy(p2a_l, p1a_l, sizeof(p2a_l));
+            std::memcpy(p2a_r, p1a_r, sizeof(p2a_r));
+        } else {
+            std::memcpy(p2a_l, dry_l, sizeof(p2a_l));
+            std::memcpy(p2a_r, dry_l, sizeof(p2a_r));
+        }
+        bool stereo_2a = plan.path_1a_feeds_2a ? stereo_1a : false;
+        const uint8_t s2 = std::min<uint8_t>(plan.split_2_after_index, c2a);
+        const uint8_t m2 = std::max<uint8_t>(s2, std::min<uint8_t>(plan.merge_2_at_index, c2a));
+
+        for (uint8_t i = 0; i < s2; ++i) {
+            ProcessSlotBlock16(plan.path_2a[i], p2a_l, p2a_r, stereo_2a, stereo_collapsed);
+        }
+
+        if (c2b > 0) {
+            split_merge_2.SplitStereo16(p2a_l, p2a_r, p2a_l, p2a_r, p2b_l, p2b_r);
+            bool stereo_2b = stereo_2a;
+            for (uint8_t i = s2; i < m2; ++i) {
+                ProcessSlotBlock16(plan.path_2a[i], p2a_l, p2a_r, stereo_2a, stereo_collapsed);
+            }
+            for (uint8_t i = 0; i < c2b; ++i) {
+                ProcessSlotBlock16(plan.path_2b[i], p2b_l, p2b_r, stereo_2b, stereo_collapsed);
+            }
+            split_merge_2.MergeStereo16(p2a_l, p2a_r, p2b_l, p2b_r, p2a_l, p2a_r);
+            stereo_2a = true;
+            for (uint8_t i = m2; i < c2a; ++i) {
+                ProcessSlotBlock16(plan.path_2a[i], p2a_l, p2a_r, stereo_2a, stereo_collapsed);
+            }
+        } else {
+            for (uint8_t i = s2; i < c2a; ++i) {
+                ProcessSlotBlock16(plan.path_2a[i], p2a_l, p2a_r, stereo_2a, stereo_collapsed);
+            }
+        }
+
+        final_l = p2a_l;
+        final_r = p2a_r;
+    }
+
+    if (has_direct_1b) {
+        for (size_t i = 0; i < kSubBlockSize; ++i) {
+            final_l[i] = 0.70710678f * (final_l[i] + p1b_l[i]);
+            final_r[i] = 0.70710678f * (final_r[i] + p1b_r[i]);
+        }
+    }
+
+    const float out_gain = DbToLin(Clamp(output_level_db, -120.0f, 18.0f));
+    const float pan_ang = (Clamp(output_pan, -1.0f, 1.0f) + 1.0f) * (kPi * 0.25f);
+    const float gl = std::cos(pan_ang) * 1.41421356f * out_gain;
+    const float gr = std::sin(pan_ang) * 1.41421356f * out_gain;
+    for (size_t i = 0; i < kSubBlockSize; ++i) {
+        out_l16[i] = final_l[i] * gl;
+        out_r16[i] = final_r[i] * gr;
+    }
+
+    if (out_stereo_collapsed) *out_stereo_collapsed = stereo_collapsed;
 }
 
 void GuitarRigGraph::ProcessSubBlock16(const float* in_mono16, float* out_l16, float* out_r16,
                                        bool* out_stereo_collapsed) noexcept {
+    if (use_dual_path_plan) {
+        ProcessDualPathSubBlock16(in_mono16, out_l16, out_r16, out_stereo_collapsed);
+        return;
+    }
+
     alignas(64) float buf_l[kSubBlockSize];
     alignas(64) float buf_r[kSubBlockSize];
     alignas(64) float par_l[kSubBlockSize];
@@ -84,90 +335,12 @@ void GuitarRigGraph::ProcessSubBlock16(const float* in_mono16, float* out_l16, f
     bool stereo_collapsed = false;
     bool merged = false;
 
-    auto process_mono_block = [&](auto&& fn) {
-        if (is_stereo_signal) {
-            stereo_collapsed = true;
-            for (size_t i = 0; i < kSubBlockSize; ++i) buf_l[i] = 0.5f * (buf_l[i] + buf_r[i]);
-        }
-        fn(buf_l, buf_l);
-        std::memcpy(buf_r, buf_l, sizeof(buf_l));
-        is_stereo_signal = false;
-    };
-
     for (RigBlockType blk : slot_order) {
-        switch (blk) {
-            case RigBlockType::kGate:
-                process_mono_block([&](const float* in, float* out) { gate.ProcessSubBlock16(in, out); });
-                break;
-            case RigBlockType::kPitch:
-                process_mono_block([&](const float* in, float* out) { pitch.ProcessSubBlock16(in, out); });
-                break;
-            case RigBlockType::kComp:
-                process_mono_block([&](const float* in, float* out) { comp.ProcessSubBlock16(in, out); });
-                break;
-            case RigBlockType::kWah:
-                process_mono_block([&](const float* in, float* out) { wah.ProcessSubBlock16(in, out); });
-                break;
-            case RigBlockType::kDrive:
-                process_mono_block([&](const float* in, float* out) { drive.ProcessSubBlock16(in, out); });
-                break;
-            case RigBlockType::kModPre:
-                mod_pre.ProcessSubBlock16(buf_l, buf_r, buf_l, buf_r);
-                if (mod_pre.GetParams().enabled && mod_pre.GetParams().is_stereo) is_stereo_signal = true;
-                break;
-            case RigBlockType::kAmp:
-                process_mono_block([&](const float* in, float* out) {
-                    if (routing_mode == RigRoutingMode::kAgouraAmpAndCab) {
-                        amp.ProcessSubBlock16(in, out);
-                    } else {
-                        clone.ProcessSubBlock16(in, out);
-                    }
-                });
-                break;
-            case RigBlockType::kCab:
-                if (routing_mode != RigRoutingMode::kNeuralFullRigNoCab) {
-                    cab.ProcessSubBlock16(buf_l, buf_l, buf_r);
-                    is_stereo_signal = true;
-                }
-                if (parallel && !merged) {
-                    split_merge.MergeStereo16(buf_l, buf_r, par_l, par_r, buf_l, buf_r);
-                    is_stereo_signal = true;
-                    merged = true;
-                }
-                break;
-            case RigBlockType::kEq:
-                if (eq.GetParams().enabled && !eq.GetParams().is_stereo && is_stereo_signal) {
-                    stereo_collapsed = true;
-                }
-                eq.ProcessSubBlock16(buf_l, buf_r, buf_l, buf_r);
-                break;
-            case RigBlockType::kVolPan:
-                vol_pan.ProcessSubBlock16(buf_l, buf_r, buf_l, buf_r);
-                if (vol_pan.GetParams().enabled) is_stereo_signal = true;
-                break;
-            case RigBlockType::kModPost:
-                if (mod_post.GetParams().enabled && !mod_post.GetParams().is_stereo && is_stereo_signal) {
-                    stereo_collapsed = true;
-                }
-                mod_post.ProcessSubBlock16(buf_l, buf_r, buf_l, buf_r);
-                if (mod_post.GetParams().enabled && mod_post.GetParams().is_stereo) is_stereo_signal = true;
-                break;
-            case RigBlockType::kDelay:
-                if (delay.GetParams().enabled && !delay.GetParams().is_stereo && is_stereo_signal) {
-                    stereo_collapsed = true;
-                }
-                delay.ProcessSubBlock16(buf_l, buf_r, buf_l, buf_r);
-                if (delay.GetParams().enabled && delay.GetParams().is_stereo) is_stereo_signal = true;
-                break;
-            case RigBlockType::kReverb:
-                if (reverb.GetParams().enabled && !reverb.GetParams().is_stereo && is_stereo_signal) {
-                    stereo_collapsed = true;
-                }
-                reverb.ProcessSubBlock16(buf_l, buf_r, buf_l, buf_r);
-                if (reverb.GetParams().enabled && reverb.GetParams().is_stereo) is_stereo_signal = true;
-                break;
-            default:
-                break;
+        ProcessSlotBlock16(RoutingSlotRef{blk, 0}, buf_l, buf_r, is_stereo_signal, stereo_collapsed);
+        if (blk == RigBlockType::kCab && parallel && !merged) {
+            split_merge.MergeStereo16(buf_l, buf_r, par_l, par_r, buf_l, buf_r);
+            is_stereo_signal = true;
+            merged = true;
         }
     }
 
@@ -239,12 +412,13 @@ void StadiumSignalChainProcessor::DrainCommands() noexcept {
 void StadiumSignalChainProcessor::ApplyCommand(const DspCommand& cmd) noexcept {
     GuitarRigGraph* g = active_graph_.load(std::memory_order_acquire);
     if (!g) return;
+    const int inst = cmd.flags & 1;
 
     switch (cmd.type) {
         case DspCommandType::kSetAmpModel: {
             const auto id = static_cast<AmpModelId>(std::max(0, std::min(cmd.int_val, static_cast<int>(AmpModelId::kCount) - 1)));
-            g->amp.SetModel(id);
-            if (g->amp_cab_link) {
+            g->AmpAt(inst).SetModel(id);
+            if (inst == 0 && g->amp_cab_link) {
                 CabSlotParams cp = g->cab.GetSlotParams(0);
                 cp.use_external_ir = false;
                 cp.factory_cab = GetAmpRecipe(id).default_cab;
@@ -255,7 +429,8 @@ void StadiumSignalChainProcessor::ApplyCommand(const DspCommand& cmd) noexcept {
             break;
         }
         case DspCommandType::kSetAmpParam: {
-            AmpParams p = g->amp.GetParams();
+            auto& target_amp = g->AmpAt(inst);
+            AmpParams p = target_amp.GetParams();
             switch (cmd.param_id) {
                 case 0: p.drive = cmd.value0; break;
                 case 1: p.bass = cmd.value0; break;
@@ -275,11 +450,11 @@ void StadiumSignalChainProcessor::ApplyCommand(const DspCommand& cmd) noexcept {
                 case 15: p.geq_v_scoop = cmd.value0; break;
                 default: break;
             }
-            g->amp.SetParams(p);
+            target_amp.SetParams(p);
             break;
         }
         case DspCommandType::kSetAmpFocusXY:
-            g->amp.ApplyFocusViewXY(cmd.value0, cmd.value1);
+            g->AmpAt(inst).ApplyFocusViewXY(cmd.value0, cmd.value1);
             break;
         case DspCommandType::kSetCloneParam: {
             NeuralCloneParams p = g->clone.GetParams();
@@ -296,7 +471,7 @@ void StadiumSignalChainProcessor::ApplyCommand(const DspCommand& cmd) noexcept {
             break;
         }
         case DspCommandType::kSetCabSlotParam: {
-            const int slot = cmd.target_id & 1;
+            const int slot = (cmd.target_id | cmd.flags) & 1;
             CabSlotParams p = g->cab.GetSlotParams(slot);
             switch (cmd.param_id) {
                 case 0: p.enabled = (cmd.int_val != 0); break;
@@ -330,41 +505,46 @@ void StadiumSignalChainProcessor::ApplyCommand(const DspCommand& cmd) noexcept {
             break;
         }
         case DspCommandType::kSetDriveFuzz: {
-            DriveFuzzParams p = g->drive.GetParams();
+            auto& target_drive = g->DriveAt(inst);
+            DriveFuzzParams p = target_drive.GetParams();
             if (cmd.param_id == 0) p.enabled = (cmd.int_val != 0);
             else if (cmd.param_id == 1) p.model = static_cast<DriveFuzzModel>(std::max(0, std::min(cmd.int_val, 11)));
             else if (cmd.param_id == 2) { p.drive = cmd.value0; p.tone = cmd.value1; p.level = cmd.value2; }
             else if (cmd.param_id == 3) { p.bass_cut = cmd.value0; p.voice_mode = cmd.int_val; }
-            g->drive.SetParams(p);
+            target_drive.SetParams(p);
             g->RefreshAutoZ();
             break;
         }
         case DspCommandType::kSetDynamics: {
             if (cmd.target_id == 0) {
-                GateParams gp = g->gate.GetParams();
+                auto& target_gate = g->GateAt(inst);
+                GateParams gp = target_gate.GetParams();
                 if (cmd.param_id == 0) gp.enabled = (cmd.int_val != 0);
                 else if (cmd.param_id == 1) { gp.threshold_db = cmd.value0; gp.decay_ms = cmd.value1; }
-                g->gate.SetParams(gp);
+                target_gate.SetParams(gp);
             } else {
-                CompParams cp = g->comp.GetParams();
+                auto& target_comp = g->CompAt(inst);
+                CompParams cp = target_comp.GetParams();
                 if (cmd.param_id == 0) cp.enabled = (cmd.int_val != 0);
                 else if (cmd.param_id == 1) cp.model = static_cast<CompModel>(cmd.int_val & 1);
                 else if (cmd.param_id == 2) { cp.peak_reduction = cmd.value0; cp.gain_db = cmd.value1; cp.mix = cmd.value2; }
-                g->comp.SetParams(cp);
+                target_comp.SetParams(cp);
             }
             break;
         }
         case DspCommandType::kSetWahFilter: {
-            WahParams p = g->wah.GetParams();
+            auto& target_wah = g->WahAt(inst);
+            WahParams p = target_wah.GetParams();
             if (cmd.param_id == 0) p.enabled = (cmd.int_val != 0);
             else if (cmd.param_id == 1) p.model = static_cast<WahFilterModel>(std::max(0, std::min(cmd.int_val, 7)));
             else if (cmd.param_id == 2) { p.position = cmd.value0; p.q_resonance = cmd.value1; p.mix = cmd.value2; }
-            g->wah.SetParams(p);
+            target_wah.SetParams(p);
             g->RefreshAutoZ();
             break;
         }
         case DspCommandType::kSetEqParam: {
-            EqParams p = g->eq.GetParams();
+            auto& target_eq = g->EqAt(inst);
+            EqParams p = target_eq.GetParams();
             if (cmd.param_id == 0) p.enabled = (cmd.int_val != 0);
             else if (cmd.param_id == 1) p.mode = static_cast<EqMode>(std::max(0, std::min(cmd.int_val, 2)));
             else if (cmd.param_id == 2) { p.low_freq = cmd.value0; p.low_gain_db = cmd.value1; p.low_q = cmd.value2; }
@@ -374,11 +554,12 @@ void StadiumSignalChainProcessor::ApplyCommand(const DspCommand& cmd) noexcept {
             else if (cmd.param_id == 6 && cmd.int_val >= 0 && cmd.int_val < 10) p.graphic_gains_db[static_cast<size_t>(cmd.int_val)] = cmd.value0;
             else if (cmd.param_id == 7) { p.tilt_db = cmd.value0; p.tilt_center_hz = cmd.value1; }
             else if (cmd.param_id == 8) { p.low_cut_hz = cmd.value0; p.high_cut_hz = cmd.value1; p.level_db = cmd.value2; }
-            g->eq.SetParams(p);
+            target_eq.SetParams(p);
             break;
         }
         case DspCommandType::kSetModulation: {
-            auto& target_mod = (cmd.target_id == 0) ? g->mod_pre : g->mod_post;
+            const int mod_idx = (cmd.target_id != 0 || inst != 0) ? 1 : 0;
+            auto& target_mod = g->ModAt(mod_idx);
             ModParams p = target_mod.GetParams();
             if (cmd.param_id == 0) p.enabled = (cmd.int_val != 0);
             else if (cmd.param_id == 1) p.model = static_cast<ModulationModel>(std::max(0, std::min(cmd.int_val, 9)));
@@ -389,7 +570,7 @@ void StadiumSignalChainProcessor::ApplyCommand(const DspCommand& cmd) noexcept {
                 if (mod_sync_ != NoteSubdivision::kOff) p.rate_hz = tempo_clock_.SubdivisionToHz(mod_sync_);
             }
             target_mod.SetParams(p);
-            if (cmd.target_id == 0) g->RefreshAutoZ();
+            if (mod_idx == 0) g->RefreshAutoZ();
             break;
         }
         case DspCommandType::kSetPitchSynth: {
@@ -402,7 +583,8 @@ void StadiumSignalChainProcessor::ApplyCommand(const DspCommand& cmd) noexcept {
         }
         case DspCommandType::kSetDelayReverb: {
             if (cmd.target_id == 0) {
-                DelayParams p = g->delay.GetParams();
+                auto& target_delay = g->DelayAt(inst);
+                DelayParams p = target_delay.GetParams();
                 if (cmd.param_id == 0) p.enabled = (cmd.int_val != 0);
                 else if (cmd.param_id == 1) p.model = static_cast<DelayModel>(std::max(0, std::min(cmd.int_val, 6)));
                 else if (cmd.param_id == 2) { p.time_ms = cmd.value0; p.feedback = cmd.value1; p.mix = cmd.value2; }
@@ -411,22 +593,24 @@ void StadiumSignalChainProcessor::ApplyCommand(const DspCommand& cmd) noexcept {
                     delay_sync_ = static_cast<NoteSubdivision>(std::max(0, std::min(cmd.int_val, 8)));
                     if (delay_sync_ != NoteSubdivision::kOff) p.time_ms = tempo_clock_.SubdivisionToMs(delay_sync_);
                 }
-                g->delay.SetParams(p);
+                target_delay.SetParams(p);
             } else {
-                ReverbParams p = g->reverb.GetParams();
+                auto& target_rev = g->ReverbAt(inst);
+                ReverbParams p = target_rev.GetParams();
                 if (cmd.param_id == 0) p.enabled = (cmd.int_val != 0);
                 else if (cmd.param_id == 1) p.model = static_cast<ReverbModel>(std::max(0, std::min(cmd.int_val, 6)));
                 else if (cmd.param_id == 2) { p.decay = cmd.value0; p.damping_hz = cmd.value1; p.mix = cmd.value2; }
                 else if (cmd.param_id == 3) { p.predelay_ms = cmd.value0; p.shimmer_amount = cmd.value1; p.mod_depth = cmd.value2; }
-                g->reverb.SetParams(p);
+                target_rev.SetParams(p);
             }
             break;
         }
         case DspCommandType::kSetVolumePan: {
-            VolumePanParams p = g->vol_pan.GetParams();
+            auto& target_vol = g->VolPanAt(inst);
+            VolumePanParams p = target_vol.GetParams();
             if (cmd.param_id == 0) p.enabled = (cmd.int_val != 0);
             else if (cmd.param_id == 1) { p.position = cmd.value0; p.pan = cmd.value1; p.stereo_width = cmd.value2; p.logarithmic = (cmd.int_val != 0); }
-            g->vol_pan.SetParams(p);
+            target_vol.SetParams(p);
             break;
         }
         case DspCommandType::kSetIoTrimPan:
@@ -440,11 +624,11 @@ void StadiumSignalChainProcessor::ApplyCommand(const DspCommand& cmd) noexcept {
         case DspCommandType::kSetBlockStereo: {
             const bool st = (cmd.int_val != 0);
             switch (static_cast<RigBlockType>(cmd.target_id)) {
-                case RigBlockType::kEq: { auto p = g->eq.GetParams(); p.is_stereo = st; g->eq.SetParams(p); break; }
+                case RigBlockType::kEq: { auto p = g->EqAt(inst).GetParams(); p.is_stereo = st; g->EqAt(inst).SetParams(p); break; }
                 case RigBlockType::kModPre: { auto p = g->mod_pre.GetParams(); p.is_stereo = st; g->mod_pre.SetParams(p); break; }
                 case RigBlockType::kModPost: { auto p = g->mod_post.GetParams(); p.is_stereo = st; g->mod_post.SetParams(p); break; }
-                case RigBlockType::kDelay: { auto p = g->delay.GetParams(); p.is_stereo = st; g->delay.SetParams(p); break; }
-                case RigBlockType::kReverb: { auto p = g->reverb.GetParams(); p.is_stereo = st; g->reverb.SetParams(p); break; }
+                case RigBlockType::kDelay: { auto p = g->DelayAt(inst).GetParams(); p.is_stereo = st; g->DelayAt(inst).SetParams(p); break; }
+                case RigBlockType::kReverb: { auto p = g->ReverbAt(inst).GetParams(); p.is_stereo = st; g->ReverbAt(inst).SetParams(p); break; }
                 default: break;
             }
             break;
@@ -455,14 +639,18 @@ void StadiumSignalChainProcessor::ApplyCommand(const DspCommand& cmd) noexcept {
         case DspCommandType::kSetGlobalBpm: {
             tempo_clock_.SetBpm(cmd.value0);
             if (delay_sync_ != NoteSubdivision::kOff) {
-                DelayParams dp = g->delay.GetParams();
-                dp.time_ms = tempo_clock_.SubdivisionToMs(delay_sync_);
-                g->delay.SetParams(dp);
+                for (int i = 0; i < 2; ++i) {
+                    DelayParams dp = g->DelayAt(i).GetParams();
+                    dp.time_ms = tempo_clock_.SubdivisionToMs(delay_sync_);
+                    g->DelayAt(i).SetParams(dp);
+                }
             }
             if (mod_sync_ != NoteSubdivision::kOff) {
-                ModParams mp = g->mod_post.GetParams();
-                mp.rate_hz = tempo_clock_.SubdivisionToHz(mod_sync_);
-                g->mod_post.SetParams(mp);
+                for (int i = 0; i < 2; ++i) {
+                    ModParams mp = g->ModAt(i).GetParams();
+                    mp.rate_hz = tempo_clock_.SubdivisionToHz(mod_sync_);
+                    g->ModAt(i).SetParams(mp);
+                }
             }
             break;
         }
@@ -720,7 +908,16 @@ void StadiumSignalChainProcessor::RequestRcuGraphSwap() {
 
 void StadiumSignalChainProcessor::SetDynamicSlotOrder(const std::array<RigBlockType, 12>& order) {
     GuitarRigGraph* g = active_graph_.load(std::memory_order_acquire);
+    g->use_dual_path_plan = false;
     g->slot_order = order;
+    g->RefreshAutoZ();
+}
+
+void StadiumSignalChainProcessor::SetDualPathRouting(const DualPathRoutingPlan& plan) {
+    GuitarRigGraph* g = active_graph_.load(std::memory_order_acquire);
+    if (!g) return;
+    g->dual_path_plan = plan;
+    g->use_dual_path_plan = true;
     g->RefreshAutoZ();
 }
 
@@ -738,6 +935,22 @@ void StadiumSignalChainProcessor::SetParallelSplitMerge(SplitMode mode, float cr
     p.merge_pan_b = pan_b;
     p.invert_phase_b = invert_b;
     g->split_merge.SetParams(p);
+}
+
+void StadiumSignalChainProcessor::SetSecondaryParallelSplitMerge(SplitMode mode, float crossover_hz, float route_ab,
+                                                                 float lvl_a_db, float lvl_b_db, float pan_a, float pan_b,
+                                                                 bool invert_b) {
+    GuitarRigGraph* g = active_graph_.load(std::memory_order_acquire);
+    ParallelRoutingParams p;
+    p.split_mode = mode;
+    p.crossover_hz = crossover_hz;
+    p.route_ab = route_ab;
+    p.merge_level_a_db = lvl_a_db;
+    p.merge_level_b_db = lvl_b_db;
+    p.merge_pan_a = pan_a;
+    p.merge_pan_b = pan_b;
+    p.invert_phase_b = invert_b;
+    g->split_merge_2.SetParams(p);
 }
 
 void StadiumSignalChainProcessor::StoreSnapshot(int idx, const SnapshotSlotData& data) {

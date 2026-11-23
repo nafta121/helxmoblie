@@ -117,6 +117,8 @@ public:
     void Reset() noexcept {
         lp1_.Reset(); lp2_.Reset();
         hp1_.Reset(); hp2_.Reset();
+        lp1_r_.Reset(); lp2_r_.Reset();
+        hp1_r_.Reset(); hp2_r_.Reset();
     }
 
     void SetParams(const ParallelRoutingParams& p) noexcept {
@@ -126,6 +128,8 @@ public:
         const auto hp = DesignHighPass(fc, 0.70710678, kSampleRateD);
         lp1_.SetCoeffs(lp); lp2_.SetCoeffs(lp);
         hp1_.SetCoeffs(hp); hp2_.SetCoeffs(hp);
+        lp1_r_.SetCoeffs(lp); lp2_r_.SetCoeffs(lp);
+        hp1_r_.SetCoeffs(hp); hp2_r_.SetCoeffs(hp);
     }
 
     const ParallelRoutingParams& GetParams() const noexcept { return params_; }
@@ -158,6 +162,32 @@ public:
         }
     }
 
+    void SplitStereo16(const float* in_l, const float* in_r,
+                       float* a_l, float* a_r,
+                       float* b_l, float* b_r) noexcept {
+        if (params_.split_mode == SplitMode::kSplitAB) {
+            const float b_w = Clamp(params_.route_ab, 0.0f, 1.0f);
+            const float a_w = 1.0f - b_w;
+            for (size_t i = 0; i < kSubBlockSize; ++i) {
+                a_l[i] = in_l[i] * a_w; a_r[i] = in_r[i] * a_w;
+                b_l[i] = in_l[i] * b_w; b_r[i] = in_r[i] * b_w;
+            }
+        } else if (params_.split_mode == SplitMode::kCrossoverLR4) {
+            for (size_t i = 0; i < kSubBlockSize; ++i) {
+                a_l[i] = lp2_.Process(lp1_.Process(in_l[i]));
+                b_l[i] = hp2_.Process(hp1_.Process(in_l[i]));
+                a_r[i] = lp2_r_.Process(lp1_r_.Process(in_r[i]));
+                b_r[i] = hp2_r_.Process(hp1_r_.Process(in_r[i]));
+            }
+        } else {
+            // Default Split Y (identical stereo copy to both A & B branches)
+            for (size_t i = 0; i < kSubBlockSize; ++i) {
+                a_l[i] = in_l[i]; a_r[i] = in_r[i];
+                b_l[i] = in_l[i]; b_r[i] = in_r[i];
+            }
+        }
+    }
+
     void MergeStereo16(const float* a_l, const float* a_r,
                        const float* b_l, const float* b_r,
                        float* out_l, float* out_r) noexcept {
@@ -180,6 +210,7 @@ public:
 private:
     ParallelRoutingParams params_{};
     BiquadDF2T lp1_, lp2_, hp1_, hp2_;
+    BiquadDF2T lp1_r_, lp2_r_, hp1_r_, hp2_r_;
 };
 
 }  // namespace stadium_dsp

@@ -48,6 +48,32 @@ enum class RigBlockType : uint8_t {
     kDelay,
     kReverb,
     kCount = 13,
+    kNone = 255,
+};
+
+struct RoutingSlotRef {
+    RigBlockType type = RigBlockType::kNone;
+    uint8_t instance_idx = 0;  // 0 = primary pool slot, 1 = secondary pool slot
+};
+
+// Full 4-branch Dual-Path Routing Plan (Path 1A/1B -> Path 2A/2B, up to 32 active slots, 0 heap alloc)
+struct DualPathRoutingPlan {
+    static constexpr size_t kMaxSlotsPerBranch = 8;
+
+    std::array<RoutingSlotRef, kMaxSlotsPerBranch> path_1a{};
+    uint8_t count_1a = 0;
+    std::array<RoutingSlotRef, kMaxSlotsPerBranch> path_1b{};
+    uint8_t count_1b = 0;
+    std::array<RoutingSlotRef, kMaxSlotsPerBranch> path_2a{};
+    uint8_t count_2a = 0;
+    std::array<RoutingSlotRef, kMaxSlotsPerBranch> path_2b{};
+    uint8_t count_2b = 0;
+
+    uint8_t split_1_after_index = 4;  // Branch 1B splits off after this index on Path 1A
+    uint8_t split_2_after_index = 2;  // Branch 2B splits off after this index on Path 2A
+    uint8_t merge_2_at_index = 3;     // Branch 2B merges back into Path 2A before this index
+    bool merge_1b_into_1a = false;    // false = 1B mixes directly to final stereo output (Space Cadet topology)
+    bool path_1a_feeds_2a = true;     // true = Path 1A cascades into Path 2A via arrow-down node
 };
 
 // Lightweight Snapshot Delta (GAP-14): recalls bypasses & core parameters on active graph
@@ -80,6 +106,8 @@ struct SnapshotSlotData {
 
 struct GuitarRigGraph {
     GuitarPickupInputZ auto_z;
+
+    // Primary DSP Instance Pool [0] (100% backwards-compatible with Tests 1-18)
     HorizonPrecisionGate gate;
     PitchSynthBlock pitch;
     StudioOptoVcaComp comp;
@@ -95,6 +123,18 @@ struct GuitarRigGraph {
     StereoTapeBbdDelay delay;
     DynamicFdnReverb reverb;
     ParallelSplitMergeNode split_merge;
+
+    // Secondary Pre-Allocated DSP Instance Pool [1] (0 RT heap alloc; skipped with 0 CPU when unused!)
+    HorizonPrecisionGate gate_2;
+    StudioOptoVcaComp comp_2;
+    InductorWahPedal wah_2;
+    DriveFuzzPedal drive_2;
+    AgouraTubeAmp amp_2;
+    StudioEqBlock eq_2;
+    VolumePanBlock vol_pan_2;
+    StereoTapeBbdDelay delay_2;
+    DynamicFdnReverb reverb_2;
+    ParallelSplitMergeNode split_merge_2;
 
     RigRoutingMode routing_mode = RigRoutingMode::kAgouraAmpAndCab;
     GuitarPickupType pickup_type = GuitarPickupType::kSingleCoil;
@@ -113,10 +153,28 @@ struct GuitarRigGraph {
         RigBlockType::kEq, RigBlockType::kVolPan, RigBlockType::kDelay, RigBlockType::kReverb,
     };
 
+    bool use_dual_path_plan = false;
+    DualPathRoutingPlan dual_path_plan{};
+
+    HorizonPrecisionGate& GateAt(int idx) noexcept { return (idx & 1) ? gate_2 : gate; }
+    StudioOptoVcaComp& CompAt(int idx) noexcept { return (idx & 1) ? comp_2 : comp; }
+    InductorWahPedal& WahAt(int idx) noexcept { return (idx & 1) ? wah_2 : wah; }
+    DriveFuzzPedal& DriveAt(int idx) noexcept { return (idx & 1) ? drive_2 : drive; }
+    StereoModulationEngine& ModAt(int idx) noexcept { return (idx & 1) ? mod_post : mod_pre; }
+    AgouraTubeAmp& AmpAt(int idx) noexcept { return (idx & 1) ? amp_2 : amp; }
+    StudioEqBlock& EqAt(int idx) noexcept { return (idx & 1) ? eq_2 : eq; }
+    VolumePanBlock& VolPanAt(int idx) noexcept { return (idx & 1) ? vol_pan_2 : vol_pan; }
+    StereoTapeBbdDelay& DelayAt(int idx) noexcept { return (idx & 1) ? delay_2 : delay; }
+    DynamicFdnReverb& ReverbAt(int idx) noexcept { return (idx & 1) ? reverb_2 : reverb; }
+
     float ResolveAutoInputImpedanceOhms() const noexcept;
     void RefreshAutoZ() noexcept;
     void SyncAmpCabImpedance() noexcept;
     void ResetAll() noexcept;
+    void ProcessSlotBlock16(RoutingSlotRef slot, float* buf_l, float* buf_r,
+                            bool& is_stereo_signal, bool& stereo_collapsed) noexcept;
+    void ProcessDualPathSubBlock16(const float* in_mono16, float* out_l16, float* out_r16,
+                                   bool* out_stereo_collapsed = nullptr) noexcept;
     void ProcessSubBlock16(const float* in_mono16, float* out_l16, float* out_r16,
                            bool* out_stereo_collapsed = nullptr) noexcept;
 };
@@ -144,9 +202,13 @@ public:
     void ConfigureDelayReverbForSpilloverTest();
     void RequestRcuGraphSwap();
     void SetDynamicSlotOrder(const std::array<RigBlockType, 12>& order);
+    void SetDualPathRouting(const DualPathRoutingPlan& plan);
     void SetParallelSplitMerge(SplitMode mode, float crossover_hz, float route_ab,
                                float lvl_a_db, float lvl_b_db, float pan_a, float pan_b,
                                bool invert_b);
+    void SetSecondaryParallelSplitMerge(SplitMode mode, float crossover_hz, float route_ab,
+                                        float lvl_a_db, float lvl_b_db, float pan_a, float pan_b,
+                                        bool invert_b);
     void StoreSnapshot(int idx, const SnapshotSlotData& data);
     void RecallSnapshot(int idx);
     void RegisterTapTempoMs(int64_t timestamp_ms);
