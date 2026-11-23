@@ -10,14 +10,37 @@ data class ShowcaseCueMarker(
     val presetId: String? = null,
 )
 
+interface LiveTimingKernel {
+    fun computeStopwatchElapsedMs(accumulatedMs: Long, startEpochMs: Long, isRunning: Boolean, nowMs: Long): Long
+    fun formatStopwatchMmSs(elapsedMs: Long): String
+    fun countTriggeredCues(cueTimestampsMs: List<Long>, nextCueIdx: Int, newPositionMs: Long): Int
+    fun findNextCueRemainingMs(cueTimestampsMs: List<Long>, nextCueIdx: Int, currentPositionMs: Long): Long
+}
+
+object KotlinLiveTimingKernel : LiveTimingKernel {
+    override fun computeStopwatchElapsedMs(accumulatedMs: Long, startEpochMs: Long, isRunning: Boolean, nowMs: Long): Long =
+        com.cleanroom.stadiumdsp.live.computeStopwatchElapsedMs(accumulatedMs, startEpochMs, isRunning, nowMs)
+
+    override fun formatStopwatchMmSs(elapsedMs: Long): String =
+        com.cleanroom.stadiumdsp.live.formatStopwatchMmSs(elapsedMs)
+
+    override fun countTriggeredCues(cueTimestampsMs: List<Long>, nextCueIdx: Int, newPositionMs: Long): Int =
+        com.cleanroom.stadiumdsp.live.countTriggeredCues(cueTimestampsMs, nextCueIdx, newPositionMs)
+
+    override fun findNextCueRemainingMs(cueTimestampsMs: List<Long>, nextCueIdx: Int, currentPositionMs: Long): Long =
+        com.cleanroom.stadiumdsp.live.findNextCueRemainingMs(cueTimestampsMs, nextCueIdx, currentPositionMs)
+}
+
 /**
  * GAP-22b: Showcase automated cue scheduler firing Snapshot/Preset switches tightly locked to song timeline.
  */
 class ShowcaseTrackPlayer(
     val cues: List<ShowcaseCueMarker> = defaultShowcaseCues(),
+    private val kernel: LiveTimingKernel = KotlinLiveTimingKernel,
     private val onCueTriggered: (ShowcaseCueMarker) -> Unit = {},
 ) {
     private val sortedCues = cues.sortedBy { it.timestampMs }
+    private val sortedTimestamps = sortedCues.map { it.timestampMs }
     private var nextCueIdx = 0
     var positionMs: Long = 0L
         private set
@@ -41,13 +64,16 @@ class ShowcaseTrackPlayer(
     fun advanceTo(newPositionMs: Long) {
         if (!isPlaying) return
         positionMs = newPositionMs.coerceAtLeast(0L)
-        while (nextCueIdx < sortedCues.size && sortedCues[nextCueIdx].timestampMs <= positionMs) {
+        val triggeredCount = kernel.countTriggeredCues(sortedTimestamps, nextCueIdx, positionMs)
+        repeat(triggeredCount) {
             onCueTriggered(sortedCues[nextCueIdx])
             nextCueIdx++
         }
     }
 
     fun nextUpcomingCue(): ShowcaseCueMarker? = sortedCues.getOrNull(nextCueIdx)
+
+    fun nextCueRemainingMs(): Long = kernel.findNextCueRemainingMs(sortedTimestamps, nextCueIdx, positionMs)
 
     companion object {
         fun defaultShowcaseCues(): List<ShowcaseCueMarker> = listOf(
@@ -63,7 +89,9 @@ class ShowcaseTrackPlayer(
 /**
  * Stage Gig Stopwatch tracking live set elapsed duration in `MM:SS`.
  */
-class GigStopwatch {
+class GigStopwatch(
+    private val kernel: LiveTimingKernel = KotlinLiveTimingKernel,
+) {
     private var startEpochMs: Long? = null
     private var accumulatedMs: Long = 0L
 
@@ -75,7 +103,7 @@ class GigStopwatch {
 
     fun pause(nowMs: Long = System.currentTimeMillis()) {
         startEpochMs?.let {
-            accumulatedMs += (nowMs - it).coerceAtLeast(0L)
+            accumulatedMs = kernel.computeStopwatchElapsedMs(accumulatedMs, it, true, nowMs)
             startEpochMs = null
         }
     }
@@ -85,15 +113,9 @@ class GigStopwatch {
         accumulatedMs = 0L
     }
 
-    fun elapsedMs(nowMs: Long = System.currentTimeMillis()): Long {
-        val active = startEpochMs?.let { (nowMs - it).coerceAtLeast(0L) } ?: 0L
-        return accumulatedMs + active
-    }
+    fun elapsedMs(nowMs: Long = System.currentTimeMillis()): Long =
+        kernel.computeStopwatchElapsedMs(accumulatedMs, startEpochMs ?: 0L, startEpochMs != null, nowMs)
 
-    fun formatElapsed(nowMs: Long = System.currentTimeMillis()): String {
-        val totalSec = (elapsedMs(nowMs) / 1000L).coerceAtLeast(0L)
-        val mins = totalSec / 60L
-        val secs = totalSec % 60L
-        return String.format("%02d:%02d", mins, secs)
-    }
+    fun formatElapsed(nowMs: Long = System.currentTimeMillis()): String =
+        kernel.formatStopwatchMmSs(elapsedMs(nowMs))
 }

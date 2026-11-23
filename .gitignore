@@ -8,6 +8,7 @@ app/.cxx/
 *.apk
 *.aab
 *.so
+!app/src/main/jniLibs/**/*.so
 *.a
 *.o
 

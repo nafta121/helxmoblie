@@ -1,0 +1,145 @@
+{
+  "schema": "rust-anything/bridge@1",
+  "root": "/home/antigravity/nafta121/helxmoblie",
+  "unit": "app/src/main/java/com/cleanroom/stadiumdsp/live/",
+  "language": "kotlin",
+  "kind": "ffi",
+  "crate_name": "live-rs",
+  "exports": [
+    {
+      "name": "computeStopwatchElapsedMs",
+      "file": "app/src/main/java/com/cleanroom/stadiumdsp/live/LiveTimingMath.kt",
+      "line": 8,
+      "params": [
+        {
+          "name": "accumulatedMs",
+          "ts_type": "int",
+          "optional": false,
+          "rest": false,
+          "native_type": "long"
+        },
+        {
+          "name": "startEpochMs",
+          "ts_type": "int",
+          "optional": false,
+          "rest": false,
+          "native_type": "long"
+        },
+        {
+          "name": "isRunning",
+          "ts_type": "boolean",
+          "optional": false,
+          "rest": false,
+          "native_type": "boolean"
+        },
+        {
+          "name": "nowMs",
+          "ts_type": "int",
+          "optional": false,
+          "rest": false,
+          "native_type": "long"
+        }
+      ],
+      "returns": "int",
+      "is_async": false,
+      "is_generator": false,
+      "type_params": [],
+      "uses_instanceof": false,
+      "native_return": "long",
+      "prototype": "com.cleanroom.stadiumdsp.live.LiveTimingMathKt.computeStopwatchElapsedMs(Long accumulatedMs, Long startEpochMs, Boolean isRunning, Long nowMs)"
+    },
+    {
+      "name": "formatStopwatchMmSs",
+      "file": "app/src/main/java/com/cleanroom/stadiumdsp/live/LiveTimingMath.kt",
+      "line": 18,
+      "params": [
+        {
+          "name": "elapsedMs",
+          "ts_type": "int",
+          "optional": false,
+          "rest": false,
+          "native_type": "long"
+        }
+      ],
+      "returns": "string",
+      "is_async": false,
+      "is_generator": false,
+      "type_params": [],
+      "uses_instanceof": false,
+      "native_return": "String",
+      "prototype": "com.cleanroom.stadiumdsp.live.LiveTimingMathKt.formatStopwatchMmSs(Long elapsedMs)"
+    },
+    {
+      "name": "countTriggeredCues",
+      "file": "app/src/main/java/com/cleanroom/stadiumdsp/live/LiveTimingMath.kt",
+      "line": 27,
+      "params": [
+        {
+          "name": "cueTimestampsMs",
+          "ts_type": "int[]",
+          "optional": false,
+          "rest": false,
+          "native_type": "List<Long>"
+        },
+        {
+          "name": "nextCueIdx",
+          "ts_type": "int",
+          "optional": false,
+          "rest": false,
+          "native_type": "int"
+        },
+        {
+          "name": "newPositionMs",
+          "ts_type": "int",
+          "optional": false,
+          "rest": false,
+          "native_type": "long"
+        }
+      ],
+      "returns": "int",
+      "is_async": false,
+      "is_generator": false,
+      "type_params": [],
+      "uses_instanceof": false,
+      "native_return": "int",
+      "prototype": "com.cleanroom.stadiumdsp.live.LiveTimingMathKt.countTriggeredCues(List<Long> cueTimestampsMs, Int nextCueIdx, Long newPositionMs)"
+    },
+    {
+      "name": "findNextCueRemainingMs",
+      "file": "app/src/main/java/com/cleanroom/stadiumdsp/live/LiveTimingMath.kt",
+      "line": 42,
+      "params": [
+        {
+          "name": "cueTimestampsMs",
+          "ts_type": "int[]",
+          "optional": false,
+          "rest": false,
+          "native_type": "List<Long>"
+        },
+        {
+          "name": "nextCueIdx",
+          "ts_type": "int",
+          "optional": false,
+          "rest": false,
+          "native_type": "int"
+        },
+        {
+          "name": "currentPositionMs",
+          "ts_type": "int",
+          "optional": false,
+          "rest": false,
+          "native_type": "long"
+        }
+      ],
+      "returns": "int",
+      "is_async": false,
+      "is_generator": false,
+      "type_params": [],
+      "uses_instanceof": false,
+      "native_return": "long",
+      "prototype": "com.cleanroom.stadiumdsp.live.LiveTimingMathKt.findNextCueRemainingMs(List<Long> cueTimestampsMs, Int nextCueIdx, Long currentPositionMs)"
+    }
+  ],
+  "classes": [],
+  "js_only": []
+}

@@ -71,6 +71,15 @@ android {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }
+
+    testOptions {
+        unitTests.all { test ->
+            val hostRustLib = rootProject.file("rust/live-rs/target/release/liblive_rs.so")
+            if (hostRustLib.exists()) {
+                test.systemProperty("rust-anything.lib.live_rs", hostRustLib.canonicalPath)
+            }
+        }
+    }
 }
 
 dependencies {

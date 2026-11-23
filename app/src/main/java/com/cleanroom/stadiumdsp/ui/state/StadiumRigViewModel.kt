@@ -190,8 +190,9 @@ class StadiumRigViewModel(
     private val favoritesStore = BlockFavoritesStore()
     private val controllerEngine = ControllerAssignmentEngine.createDefault()
     private val footswitchMatrix = LiveFootswitchMatrix(initialPreset.snapshots)
-    private val gigStopwatch = GigStopwatch()
+    private val gigStopwatch = GigStopwatch(kernel = com.cleanroom.stadiumdsp.rustbridge.LiveTimingRustBridge.INSTANCE)
     private val showcasePlayer = ShowcaseTrackPlayer(
+        kernel = com.cleanroom.stadiumdsp.rustbridge.LiveTimingRustBridge.INSTANCE,
         onCueTriggered = { cue ->
             cue.snapshotIndex?.let { selectSnapshot(it) }
             cue.presetId?.let { selectPreset(it) }
