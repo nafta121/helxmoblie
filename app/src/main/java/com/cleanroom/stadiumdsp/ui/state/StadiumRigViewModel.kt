@@ -7,6 +7,7 @@ import com.cleanroom.stadiumdsp.DspBridgeGateway
 import com.cleanroom.stadiumdsp.DspCommandCode
 import com.cleanroom.stadiumdsp.LiveTelemetryUi
 import com.cleanroom.stadiumdsp.NativeDspBridge
+import com.cleanroom.stadiumdsp.RigBlockCode
 import com.cleanroom.stadiumdsp.StreamDiagnosticsUi
 import com.cleanroom.stadiumdsp.audio.AudioBufferPlanner
 import com.cleanroom.stadiumdsp.audio.AudioDeviceEnumerator
@@ -31,12 +32,14 @@ import com.cleanroom.stadiumdsp.midi.StadiumMidiParser
 import com.cleanroom.stadiumdsp.midi.StageLockPolicy
 import com.cleanroom.stadiumdsp.preset.BlockCategory
 import com.cleanroom.stadiumdsp.preset.BlockFavoritesStore
+import com.cleanroom.stadiumdsp.preset.DualPathRoutingEngine
 import com.cleanroom.stadiumdsp.preset.FavoriteBlockEntry
 import com.cleanroom.stadiumdsp.preset.FocusZoneBank
 import com.cleanroom.stadiumdsp.preset.FocusZoneInterpolator
 import com.cleanroom.stadiumdsp.preset.PresetRepository
 import com.cleanroom.stadiumdsp.preset.RigBlockState
 import com.cleanroom.stadiumdsp.preset.RigHistoryManager
+import com.cleanroom.stadiumdsp.preset.SignalFlowState
 import com.cleanroom.stadiumdsp.preset.SnapshotManager
 import com.cleanroom.stadiumdsp.preset.SplitRoutingMode
 import com.cleanroom.stadiumdsp.preset.StadiumPreset
@@ -54,6 +57,52 @@ enum class WorkspaceDestination(val label: String) {
     TUNER("Tuner"),
 }
 
+/**
+ * Exact 12-item Helix Stadium Native Model Browser category rail (+ Favorites).
+ */
+enum class BrowserCategoryTab(
+    val label: String,
+    val bannerTitle: String,
+    val blockCategory: BlockCategory?,
+    val colorHex: Long,
+) {
+    FAVORITES("Favorites", "FAVORITES", null, 0xFFD8D8D8L),
+    AMP("Amp", "GUITAR AMP", BlockCategory.AMP, BlockCategory.AMP.colorHex),
+    PREAMP("Preamp", "PREAMP", BlockCategory.AMP, BlockCategory.AMP.colorHex),
+    CAB("Cab", "SPEAKER CAB / IR", BlockCategory.CAB, BlockCategory.CAB.colorHex),
+    DISTORTION("Distortion", "DISTORTION & DRIVE", BlockCategory.DISTORTION, BlockCategory.DISTORTION.colorHex),
+    DELAY("Delay", "DELAY", BlockCategory.DELAY, BlockCategory.DELAY.colorHex),
+    REVERB("Reverb", "REVERB", BlockCategory.REVERB, BlockCategory.REVERB.colorHex),
+    MODULATION("Modulation", "MODULATION", BlockCategory.MODULATION, BlockCategory.MODULATION.colorHex),
+    DYNAMICS("Dynamics", "DYNAMICS", BlockCategory.DYNAMICS, BlockCategory.DYNAMICS.colorHex),
+    EQ("EQ", "EQUALIZER", BlockCategory.EQ, BlockCategory.EQ.colorHex),
+    PITCH_SYNTH("Pitch/Synth", "PITCH / SYNTH", BlockCategory.PITCH_WAH, BlockCategory.PITCH_WAH.colorHex),
+    WAH_FILTER("Wah/Filter", "WAH / FILTER", BlockCategory.PITCH_WAH, BlockCategory.PITCH_WAH.colorHex),
+    VOL_PAN("Volume/Pan", "VOLUME / PAN", BlockCategory.VOL_PAN, BlockCategory.VOL_PAN.colorHex);
+
+    companion object {
+        fun fromBlock(blk: RigBlockState): BrowserCategoryTab = when (blk.nativeBlockCode) {
+            RigBlockCode.AMP -> AMP
+            RigBlockCode.CAB -> CAB
+            RigBlockCode.DRIVE -> DISTORTION
+            RigBlockCode.DELAY -> DELAY
+            RigBlockCode.REVERB -> REVERB
+            RigBlockCode.MOD_PRE, RigBlockCode.MOD_POST -> MODULATION
+            RigBlockCode.GATE, RigBlockCode.COMP -> DYNAMICS
+            RigBlockCode.EQ -> EQ
+            RigBlockCode.PITCH -> PITCH_SYNTH
+            RigBlockCode.WAH -> WAH_FILTER
+            RigBlockCode.VOL_PAN -> VOL_PAN
+            else -> AMP
+        }
+    }
+}
+
+data class PendingInsertSlot(
+    val branch: String,
+    val indexInBranch: Int,
+)
+
 data class TunerConfigUi(
     val enabled: Boolean = false,
     val refPitchHz: Float = 440f,
@@ -62,10 +111,24 @@ data class TunerConfigUi(
     val useFlats: Boolean = false,
 )
 
+private val EMPTY_CANVAS_PLACEHOLDER = RigBlockState(
+    id = "__empty__",
+    nativeBlockCode = RigBlockCode.AMP,
+    category = BlockCategory.ROUTING,
+    modelId = 0,
+    displayName = "Empty Signal Slot",
+    shortLabel = "Empty",
+    enabled = false,
+    pathBranch = "1A",
+)
+
 data class StadiumUiState(
     val activePreset: StadiumPreset = StadiumPreset.createDefaultPreset(),
     val allPresets: List<StadiumPreset> = emptyList(),
     val selectedBlockId: String = "amp",
+    val isModelBrowserOpen: Boolean = true,
+    val pendingInsertSlot: PendingInsertSlot? = null,
+    val activeBrowserTab: BrowserCategoryTab = BrowserCategoryTab.AMP,
     val activeSnapshotIndex: Int = 0,
     val snapshotDiscardEdits: Boolean = false, // false=White Camera (Auto-Remember), true=Red Camera (Discard Edits)
     val stageLock: Boolean = false,
@@ -104,9 +167,12 @@ data class StadiumUiState(
     val gigStopwatchRunning: Boolean = false,
     val favoritesCount: Int = 0,
 ) {
-    val selectedBlock: RigBlockState
+    val selectedBlockOrNull: RigBlockState?
         get() = activePreset.signalFlow.blocks.firstOrNull { it.id == selectedBlockId }
-            ?: activePreset.signalFlow.blocks.first()
+            ?: activePreset.signalFlow.blocks.firstOrNull()
+
+    val selectedBlock: RigBlockState
+        get() = selectedBlockOrNull ?: EMPTY_CANVAS_PLACEHOLDER
 }
 
 /**
@@ -539,9 +605,188 @@ class StadiumRigViewModel(
         commitPresetMutation(_uiState.value.activePreset.copy(snapshotControlledParams = nextSet))
     }
 
-    fun selectBlock(blockId: String) {
-        _uiState.update { it.copy(selectedBlockId = blockId) }
+    fun selectBlock(blockId: String, openBrowser: Boolean = true) {
+        val blk = _uiState.value.activePreset.signalFlow.blocks.firstOrNull { it.id == blockId }
+        _uiState.update { st ->
+            st.copy(
+                selectedBlockId = blockId,
+                isModelBrowserOpen = openBrowser,
+                pendingInsertSlot = null,
+                activeBrowserTab = blk?.let { BrowserCategoryTab.fromBlock(it) } ?: st.activeBrowserTab,
+            )
+        }
         refreshEqAndCabPlots()
+    }
+
+    fun openModelBrowser(
+        forBlockId: String? = null,
+        insertSlot: PendingInsertSlot? = null,
+        tab: BrowserCategoryTab? = null,
+    ) {
+        val blocks = _uiState.value.activePreset.signalFlow.blocks
+        val blk = forBlockId?.let { id -> blocks.firstOrNull { it.id == id } }
+        _uiState.update { st ->
+            st.copy(
+                selectedBlockId = forBlockId ?: st.selectedBlockId,
+                isModelBrowserOpen = true,
+                pendingInsertSlot = insertSlot,
+                activeBrowserTab = tab ?: blk?.let { BrowserCategoryTab.fromBlock(it) } ?: st.activeBrowserTab,
+            )
+        }
+    }
+
+    fun closeModelBrowser() {
+        if (!_uiState.value.isModelBrowserOpen && _uiState.value.pendingInsertSlot == null) return
+        _uiState.update { it.copy(isModelBrowserOpen = false, pendingInsertSlot = null) }
+    }
+
+    fun toggleModelBrowser() {
+        _uiState.update { st ->
+            val nextOpen = !st.isModelBrowserOpen
+            st.copy(
+                isModelBrowserOpen = nextOpen,
+                pendingInsertSlot = if (nextOpen) st.pendingInsertSlot else null,
+            )
+        }
+    }
+
+    fun setBrowserTab(tab: BrowserCategoryTab) {
+        _uiState.update { it.copy(activeBrowserTab = tab, isModelBrowserOpen = true) }
+    }
+
+    fun insertBlockAt(
+        category: BlockCategory,
+        nativeBlockCode: Int,
+        modelId: Int,
+        displayName: String,
+        shortLabel: String,
+        targetBranch: String,
+        targetIndexInBranch: Int,
+        isPreamp: Boolean = false,
+    ): Boolean {
+        if (!StageLockPolicy.allowBlockReorderOrDelete(_uiState.value.stageLock)) return false
+        val currentFlow = _uiState.value.activePreset.signalFlow
+        val res = DualPathRoutingEngine.insertBlockAt(
+            flow = currentFlow,
+            category = category,
+            nativeBlockCode = nativeBlockCode,
+            modelId = modelId,
+            displayName = displayName,
+            shortLabel = shortLabel,
+            targetBranch = targetBranch,
+            targetIndexInBranch = targetIndexInBranch,
+            isPreamp = isPreamp,
+        )
+        if (res.error != null || res.activeBlockId == null) {
+            _uiState.update { it.copy(statusBanner = res.error ?: "Cannot insert block") }
+            return false
+        }
+        val newBlock = res.flow.blocks.firstOrNull { it.id == res.activeBlockId }
+        if (newBlock != null) {
+            syncSingleBlockToNative(newBlock)
+        }
+        syncDualPathRoutingToNative(res.flow)
+        commitPresetMutation(
+            _uiState.value.activePreset.copy(signalFlow = res.flow),
+            banner = "Added $displayName to Path $targetBranch",
+        )
+        _uiState.update { st ->
+            st.copy(
+                selectedBlockId = res.activeBlockId,
+                pendingInsertSlot = null,
+                activeBrowserTab = newBlock?.let { BrowserCategoryTab.fromBlock(it) } ?: st.activeBrowserTab,
+            )
+        }
+        refreshEqAndCabPlots()
+        return true
+    }
+
+    fun replaceBlockAt(
+        blockId: String,
+        category: BlockCategory,
+        nativeBlockCode: Int,
+        modelId: Int,
+        displayName: String,
+        shortLabel: String,
+        isPreamp: Boolean = false,
+    ): Boolean {
+        if (!StageLockPolicy.allowBlockReorderOrDelete(_uiState.value.stageLock)) return false
+        val currentFlow = _uiState.value.activePreset.signalFlow
+        val oldBlock = currentFlow.blocks.firstOrNull { it.id == blockId } ?: return false
+        val res = DualPathRoutingEngine.replaceBlockAt(
+            flow = currentFlow,
+            blockId = blockId,
+            category = category,
+            nativeBlockCode = nativeBlockCode,
+            modelId = modelId,
+            displayName = displayName,
+            shortLabel = shortLabel,
+            isPreamp = isPreamp,
+        )
+        if (res.error != null) {
+            _uiState.update { it.copy(statusBanner = res.error) }
+            return false
+        }
+        if (DualPathRoutingEngine.poolFamilyKey(oldBlock.nativeBlockCode) != DualPathRoutingEngine.poolFamilyKey(nativeBlockCode)) {
+            dispatchBlockBypassToNative(oldBlock, enabled = false)
+        }
+        val replaced = res.flow.blocks.firstOrNull { it.id == blockId }
+        if (replaced != null) {
+            syncSingleBlockToNative(replaced)
+        }
+        syncDualPathRoutingToNative(res.flow)
+        commitPresetMutation(
+            _uiState.value.activePreset.copy(signalFlow = res.flow),
+            banner = "Loaded $displayName",
+        )
+        _uiState.update { st ->
+            st.copy(
+                selectedBlockId = blockId,
+                pendingInsertSlot = null,
+                activeBrowserTab = replaced?.let { BrowserCategoryTab.fromBlock(it) } ?: st.activeBrowserTab,
+            )
+        }
+        refreshEqAndCabPlots()
+        return true
+    }
+
+    fun moveBlockTo(blockId: String, targetBranch: String, targetIndexInBranch: Int): Boolean {
+        if (!StageLockPolicy.allowBlockReorderOrDelete(_uiState.value.stageLock)) return false
+        val currentFlow = _uiState.value.activePreset.signalFlow
+        val res = DualPathRoutingEngine.moveBlockTo(currentFlow, blockId, targetBranch, targetIndexInBranch)
+        if (res.error != null) {
+            _uiState.update { it.copy(statusBanner = res.error) }
+            return false
+        }
+        syncDualPathRoutingToNative(res.flow)
+        val movedName = res.flow.blocks.firstOrNull { it.id == blockId }?.shortLabel ?: blockId
+        commitPresetMutation(
+            _uiState.value.activePreset.copy(signalFlow = res.flow),
+            banner = "Moved $movedName -> Path $targetBranch",
+        )
+        _uiState.update { it.copy(selectedBlockId = blockId) }
+        return true
+    }
+
+    fun removeBlock(blockId: String): Boolean {
+        if (!StageLockPolicy.allowBlockReorderOrDelete(_uiState.value.stageLock)) return false
+        val currentFlow = _uiState.value.activePreset.signalFlow
+        val target = currentFlow.blocks.firstOrNull { it.id == blockId } ?: return false
+        dispatchBlockBypassToNative(target, enabled = false)
+        val res = DualPathRoutingEngine.removeBlock(currentFlow, blockId)
+        syncDualPathRoutingToNative(res.flow)
+        commitPresetMutation(
+            _uiState.value.activePreset.copy(signalFlow = res.flow),
+            banner = "Removed ${target.displayName}",
+        )
+        _uiState.update { st ->
+            st.copy(
+                selectedBlockId = res.activeBlockId ?: "",
+                pendingInsertSlot = null,
+            )
+        }
+        refreshEqAndCabPlots()
+        return true
     }
 
     fun toggleBlockBypass(blockId: String, fromLiveController: Boolean = false) {
@@ -578,7 +823,12 @@ class StadiumRigViewModel(
         val updatedBlocks = _uiState.value.activePreset.signalFlow.blocks.map { blk ->
             if (blk.id == blockId) {
                 val nextStereo = !blk.isStereo
-                bridge.enqueueCommand(DspCommandCode.SET_BLOCK_STEREO, targetId = blk.nativeBlockCode, intVal = if (nextStereo) 1 else 0)
+                bridge.enqueueCommand(
+                    DspCommandCode.SET_BLOCK_STEREO,
+                    targetId = blk.nativeBlockCode,
+                    flags = blk.instanceIndex,
+                    intVal = if (nextStereo) 1 else 0,
+                )
                 blk.copy(isStereo = nextStereo)
             } else blk
         }
@@ -588,18 +838,39 @@ class StadiumRigViewModel(
     fun moveBlock(fromIndex: Int, toIndex: Int) {
         if (!StageLockPolicy.allowBlockReorderOrDelete(_uiState.value.stageLock)) return
         val updatedFlow = SignalFlowRoutingLogic.moveBlock(_uiState.value.activePreset.signalFlow, fromIndex, toIndex)
-        bridge.setDynamicSlotOrder(updatedFlow.blocks.take(12).map { it.nativeBlockCode }.toIntArray())
+        syncDualPathRoutingToNative(updatedFlow)
         commitPresetMutation(_uiState.value.activePreset.copy(signalFlow = updatedFlow))
     }
 
     fun setSplitMode(mode: SplitRoutingMode) {
         if (_uiState.value.stageLock) return
         val flow = _uiState.value.activePreset.signalFlow.copy(splitMode = mode)
-        bridge.setParallelSplitMerge(
-            mode.nativeCode, flow.crossoverHz, flow.routeAb,
-            flow.mergeLevelADb, flow.mergeLevelBDb, flow.mergePanA, flow.mergePanB, flow.invertPhaseB,
-        )
+        syncDualPathRoutingToNative(flow)
         commitPresetMutation(_uiState.value.activePreset.copy(signalFlow = flow))
+    }
+
+    fun cycleSplitMode2() {
+        if (_uiState.value.stageLock) return
+        val all = SplitRoutingMode.entries
+        val cur = _uiState.value.activePreset.signalFlow.splitMode2
+        val next = all[(cur.ordinal + 1) % all.size]
+        val flow = _uiState.value.activePreset.signalFlow.copy(splitMode2 = next)
+        syncDualPathRoutingToNative(flow)
+        commitPresetMutation(
+            _uiState.value.activePreset.copy(signalFlow = flow),
+            banner = "Path 2 Split: ${next.label}",
+        )
+    }
+
+    fun toggleMerge1bInto1a() {
+        if (_uiState.value.stageLock) return
+        val cur = _uiState.value.activePreset.signalFlow
+        val flow = cur.copy(merge1bInto1a = !cur.merge1bInto1a)
+        syncDualPathRoutingToNative(flow)
+        commitPresetMutation(
+            _uiState.value.activePreset.copy(signalFlow = flow),
+            banner = if (flow.merge1bInto1a) "Path 1B Merged into 1A" else "Path 1B Direct Parallel Out",
+        )
     }
 
     fun toggleAmpCabLink() {
@@ -614,15 +885,71 @@ class StadiumRigViewModel(
         commitPresetMutation(_uiState.value.activePreset.copy(signalFlow = _uiState.value.activePreset.signalFlow.copy(cabCabLink = next)))
     }
 
-    fun selectAmpModel(ampNativeId: Int) {
+    fun selectAmpModel(ampNativeId: Int, isPreamp: Boolean = false) {
         if (_uiState.value.stageLock) return
-        val updatedFlow = SignalFlowRoutingLogic.selectAmpModel(_uiState.value.activePreset.signalFlow, ampNativeId)
-        bridge.enqueueCommand(DspCommandCode.SET_RIG_ROUTING_MODE, intVal = 0)
-        bridge.enqueueCommand(DspCommandCode.SET_AMP_MODEL, intVal = ampNativeId)
         val spec = AmpModelCatalog.byId(ampNativeId)
+        val pending = _uiState.value.pendingInsertSlot
+        if (pending != null) {
+            insertBlockAt(
+                category = BlockCategory.AMP,
+                nativeBlockCode = RigBlockCode.AMP,
+                modelId = ampNativeId,
+                displayName = if (isPreamp) "${spec.displayName} Pre" else spec.displayName,
+                shortLabel = spec.shortLabel,
+                targetBranch = pending.branch,
+                targetIndexInBranch = pending.indexInBranch,
+                isPreamp = isPreamp,
+            )
+            return
+        }
+        val sel = _uiState.value.selectedBlockOrNull
+        if (sel != null && sel.nativeBlockCode == RigBlockCode.AMP && sel.instanceIndex > 0) {
+            replaceBlockAt(
+                blockId = sel.id,
+                category = BlockCategory.AMP,
+                nativeBlockCode = RigBlockCode.AMP,
+                modelId = ampNativeId,
+                displayName = if (isPreamp) "${spec.displayName} Pre" else spec.displayName,
+                shortLabel = spec.shortLabel,
+                isPreamp = isPreamp,
+            )
+            return
+        }
+        if (sel != null && sel.nativeBlockCode != RigBlockCode.AMP && _uiState.value.activePreset.signalFlow.blocks.none { it.id == "amp" }) {
+            replaceBlockAt(
+                blockId = sel.id,
+                category = BlockCategory.AMP,
+                nativeBlockCode = RigBlockCode.AMP,
+                modelId = ampNativeId,
+                displayName = if (isPreamp) "${spec.displayName} Pre" else spec.displayName,
+                shortLabel = spec.shortLabel,
+                isPreamp = isPreamp,
+            )
+            return
+        }
+        val updatedFlow = SignalFlowRoutingLogic.selectAmpModel(_uiState.value.activePreset.signalFlow, ampNativeId)
+        val finalFlow = if (isPreamp) {
+            updatedFlow.copy(
+                blocks = updatedFlow.blocks.map { b ->
+                    if (b.id == "amp") {
+                        b.copy(
+                            displayName = "${spec.displayName} Pre",
+                            params = b.params + mapOf("amp.master" to 0.22f, "amp.sag" to 0.0f, "amp.ripple" to 0.0f),
+                        )
+                    } else b
+                }
+            )
+        } else {
+            updatedFlow
+        }
+        bridge.enqueueCommand(DspCommandCode.SET_RIG_ROUTING_MODE, intVal = 0)
+        bridge.enqueueCommand(DspCommandCode.SET_AMP_MODEL, flags = 0, intVal = ampNativeId)
+        if (finalFlow.ampCabLink) {
+            bridge.enqueueCommand(DspCommandCode.SET_CAB_SLOT_PARAM, targetId = 0, paramId = 1, intVal = spec.defaultCabId)
+        }
         commitPresetMutation(
-            _uiState.value.activePreset.copy(signalFlow = updatedFlow.copy(routingMode = 0)),
-            banner = "Amp: ${spec.displayName} (*Based on ${spec.basedOn})",
+            _uiState.value.activePreset.copy(signalFlow = finalFlow.copy(routingMode = 0)),
+            banner = "${if (isPreamp) "Preamp" else "Amp"}: ${spec.displayName} (*Based on ${spec.basedOn})",
         )
         refreshEqAndCabPlots()
     }
@@ -630,9 +957,31 @@ class StadiumRigViewModel(
     fun selectCabModel(cabNativeId: Int) {
         if (_uiState.value.stageLock) return
         val spec = FactoryCabCatalog.cabById(cabNativeId)
-        bridge.enqueueCommand(DspCommandCode.SET_CAB_SLOT_PARAM, targetId = 0, paramId = 1, intVal = cabNativeId)
+        val pending = _uiState.value.pendingInsertSlot
+        if (pending != null) {
+            insertBlockAt(
+                category = BlockCategory.CAB,
+                nativeBlockCode = RigBlockCode.CAB,
+                modelId = cabNativeId,
+                displayName = spec.displayName,
+                shortLabel = spec.shortLabel,
+                targetBranch = pending.branch,
+                targetIndexInBranch = pending.indexInBranch,
+            )
+            return
+        }
+        val targetCab = _uiState.value.selectedBlockOrNull?.takeIf { it.nativeBlockCode == RigBlockCode.CAB }
+            ?: _uiState.value.activePreset.signalFlow.blocks.firstOrNull { it.nativeBlockCode == RigBlockCode.CAB }
+        val targetId = targetCab?.id ?: return
+        bridge.enqueueCommand(
+            DspCommandCode.SET_CAB_SLOT_PARAM,
+            targetId = 0,
+            paramId = 1,
+            flags = targetCab.instanceIndex,
+            intVal = cabNativeId,
+        )
         val updatedBlocks = _uiState.value.activePreset.signalFlow.blocks.map { blk ->
-            if (blk.id == "cab") blk.copy(modelId = cabNativeId, displayName = spec.displayName, shortLabel = spec.shortLabel)
+            if (blk.id == targetId) blk.copy(modelId = cabNativeId, displayName = spec.displayName, shortLabel = spec.shortLabel)
             else blk
         }
         commitPresetMutation(
@@ -646,8 +995,17 @@ class StadiumRigViewModel(
     fun selectMicModel(micNativeId: Int) {
         if (_uiState.value.stageLock) return
         val mic = FactoryCabCatalog.micById(micNativeId)
-        bridge.enqueueCommand(DspCommandCode.SET_CAB_SLOT_PARAM, targetId = 0, paramId = 2, intVal = micNativeId)
-        updateParameter("cab", "cab.mic_model", micNativeId.toFloat(), fromLiveController = false)
+        val cabBlk = _uiState.value.selectedBlockOrNull?.takeIf { it.nativeBlockCode == RigBlockCode.CAB }
+            ?: _uiState.value.activePreset.signalFlow.blocks.firstOrNull { it.nativeBlockCode == RigBlockCode.CAB }
+        val cabId = cabBlk?.id ?: "cab"
+        bridge.enqueueCommand(
+            DspCommandCode.SET_CAB_SLOT_PARAM,
+            targetId = 0,
+            paramId = 2,
+            flags = cabBlk?.instanceIndex ?: 0,
+            intVal = micNativeId,
+        )
+        updateParameter(cabId, "cab.mic_model", micNativeId.toFloat(), fromLiveController = false)
         _uiState.update { it.copy(statusBanner = "Cab Mic: ${mic.displayName} (${mic.basedOn})") }
         refreshEqAndCabPlots()
     }
@@ -655,21 +1013,10 @@ class StadiumRigViewModel(
     fun selectFxModel(blockId: String, modelNativeId: Int, displayName: String, shortLabel: String) {
         if (_uiState.value.stageLock) return
         val blk = _uiState.value.activePreset.signalFlow.blocks.firstOrNull { it.id == blockId } ?: return
-        when (blk.category) {
-            BlockCategory.DISTORTION -> bridge.enqueueCommand(DspCommandCode.SET_DRIVE_FUZZ, paramId = 1, intVal = modelNativeId)
-            BlockCategory.MODULATION -> bridge.enqueueCommand(DspCommandCode.SET_MODULATION, targetId = 1, paramId = 1, intVal = modelNativeId)
-            BlockCategory.DELAY -> bridge.enqueueCommand(DspCommandCode.SET_DELAY_REVERB, targetId = 0, paramId = 1, intVal = modelNativeId)
-            BlockCategory.REVERB -> bridge.enqueueCommand(DspCommandCode.SET_DELAY_REVERB, targetId = 1, paramId = 1, intVal = modelNativeId)
-            BlockCategory.PITCH_WAH -> {
-                if (blk.id == "wah") bridge.enqueueCommand(DspCommandCode.SET_WAH_FILTER, paramId = 1, intVal = modelNativeId)
-                else bridge.enqueueCommand(DspCommandCode.SET_PITCH_SYNTH, paramId = 1, intVal = modelNativeId)
-            }
-            BlockCategory.DYNAMICS -> if (blk.id == "comp") bridge.enqueueCommand(DspCommandCode.SET_DYNAMICS, targetId = 1, paramId = 1, intVal = modelNativeId)
-            BlockCategory.EQ -> bridge.enqueueCommand(DspCommandCode.SET_EQ_PARAM, paramId = 1, intVal = modelNativeId)
-            else -> Unit
-        }
+        val updatedBlk = blk.copy(modelId = modelNativeId, displayName = displayName, shortLabel = shortLabel)
+        dispatchBlockModelToNative(updatedBlk)
         val updatedBlocks = _uiState.value.activePreset.signalFlow.blocks.map {
-            if (it.id == blockId) it.copy(modelId = modelNativeId, displayName = displayName, shortLabel = shortLabel) else it
+            if (it.id == blockId) updatedBlk else it
         }
         commitPresetMutation(
             _uiState.value.activePreset.copy(signalFlow = _uiState.value.activePreset.signalFlow.copy(blocks = updatedBlocks)),
@@ -681,10 +1028,14 @@ class StadiumRigViewModel(
     fun updateParameter(blockId: String, paramKey: String, value: Float, fromLiveController: Boolean = false) {
         if (!StageLockPolicy.allowParameterEdit(_uiState.value.stageLock, fromLiveController)) return
 
+        var needsPlotRefresh = false
         val updatedBlocks = _uiState.value.activePreset.signalFlow.blocks.map { blk ->
             if (blk.id == blockId) {
                 val updated = blk.copy(params = blk.params + (paramKey to value))
                 dispatchBlockParamsToNative(updated, paramKey, value)
+                if (blk.nativeBlockCode == RigBlockCode.EQ || blk.nativeBlockCode == RigBlockCode.CAB) {
+                    needsPlotRefresh = true
+                }
                 updated
             } else blk
         }
@@ -695,7 +1046,7 @@ class StadiumRigViewModel(
             snapshots = snapshotManager.allSnapshots(),
         )
         commitPresetMutation(nextPreset)
-        if (blockId == "eq" || blockId == "cab") {
+        if (needsPlotRefresh) {
             refreshEqAndCabPlots()
         }
     }
@@ -707,13 +1058,14 @@ class StadiumRigViewModel(
         val block = _uiState.value.activePreset.signalFlow.blocks.firstOrNull { it.id == blockId } ?: return
         val zone = FocusZoneBank.forBlock(block)
         val interpolated = FocusZoneInterpolator.evaluate(zone, cx, cy)
+        val keyPrefix = paramPrefixFor(block.nativeBlockCode)
 
         val prefixed = interpolated.mapKeys { (k, _) ->
-            if (k.contains(".")) k else "${block.id}.$k"
+            if (k.contains(".")) k else "$keyPrefix.$k"
         }
 
         if (block.category == BlockCategory.AMP) {
-            bridge.enqueueCommand(DspCommandCode.SET_AMP_FOCUS_XY, value0 = cx, value1 = cy)
+            bridge.enqueueCommand(DspCommandCode.SET_AMP_FOCUS_XY, flags = block.instanceIndex, value0 = cx, value1 = cy)
         }
 
         val updatedBlocks = _uiState.value.activePreset.signalFlow.blocks.map { blk ->
@@ -751,8 +1103,9 @@ class StadiumRigViewModel(
 
     fun applyFactoryDefault(blockId: String) {
         if (_uiState.value.stageLock) return
-        val factoryBlk = StadiumPreset.defaultBlocks().firstOrNull { it.id == blockId } ?: return
-        factoryBlk.params.forEach { (k, v) -> updateParameter(blockId, k, v) }
+        val blk = _uiState.value.activePreset.signalFlow.blocks.firstOrNull { it.id == blockId } ?: return
+        val defaults = DualPathRoutingEngine.defaultParamsFor(blk.nativeBlockCode)
+        defaults.forEach { (k, v) -> updateParameter(blockId, k, v) }
         updateFocusXY(blockId, 0f, 0f)
         _uiState.update { it.copy(statusBanner = "Restored Factory Default") }
     }
@@ -775,6 +1128,8 @@ class StadiumRigViewModel(
             )
         }
     }
+
+    fun allFavorites(): List<FavoriteBlockEntry> = favoritesStore.favorites
 
     fun registerTapTempo(nowMs: Long = System.currentTimeMillis()) {
         val bpm = bridge.registerTapTempoMs(nowMs).coerceIn(40f, 240f)
@@ -799,6 +1154,14 @@ class StadiumRigViewModel(
         _uiState.update {
             it.copy(activePreset = it.activePreset.copy(inputTrimDb = inC, outputLevelDb = outC))
         }
+    }
+
+    fun setInputTrimDb(inputDb: Float) {
+        setIoTrim(inputDb, _uiState.value.activePreset.outputLevelDb)
+    }
+
+    fun setOutputLevelDb(outputDb: Float) {
+        setIoTrim(_uiState.value.activePreset.inputTrimDb, outputDb)
     }
 
     fun togglePresetClipPlayback() {
@@ -1006,24 +1369,72 @@ class StadiumRigViewModel(
         }
     }
 
+    private fun paramPrefixFor(nativeBlockCode: Int): String = when (nativeBlockCode) {
+        RigBlockCode.GATE -> "gate"
+        RigBlockCode.PITCH -> "pitch"
+        RigBlockCode.COMP -> "comp"
+        RigBlockCode.WAH -> "wah"
+        RigBlockCode.DRIVE -> "drive"
+        RigBlockCode.MOD_PRE, RigBlockCode.MOD_POST -> "mod"
+        RigBlockCode.AMP -> "amp"
+        RigBlockCode.CAB -> "cab"
+        RigBlockCode.EQ -> "eq"
+        RigBlockCode.VOL_PAN -> "vol"
+        RigBlockCode.DELAY -> "delay"
+        RigBlockCode.REVERB -> "reverb"
+        else -> "fx"
+    }
+
+    private fun syncSingleBlockToNative(blk: RigBlockState) {
+        dispatchBlockModelToNative(blk)
+        dispatchBlockBypassToNative(blk, blk.enabled)
+        bridge.enqueueCommand(
+            DspCommandCode.SET_BLOCK_STEREO,
+            targetId = blk.nativeBlockCode,
+            flags = blk.instanceIndex,
+            intVal = if (blk.isStereo) 1 else 0,
+        )
+        blk.params.forEach { (k, v) -> dispatchBlockParamsToNative(blk, k, v) }
+    }
+
+    private fun syncDualPathRoutingToNative(flow: SignalFlowState) {
+        val b1a = DualPathRoutingEngine.blocksOnBranch(flow, "1A")
+        val b1b = DualPathRoutingEngine.blocksOnBranch(flow, "1B")
+        val b2a = DualPathRoutingEngine.blocksOnBranch(flow, "2A")
+        val b2b = DualPathRoutingEngine.blocksOnBranch(flow, "2B")
+
+        bridge.setParallelSplitMerge(
+            flow.splitMode.nativeCode, flow.crossoverHz, flow.routeAb,
+            flow.mergeLevelADb, flow.mergeLevelBDb, flow.mergePanA, flow.mergePanB, flow.invertPhaseB,
+        )
+        bridge.setSecondaryParallelSplitMerge(
+            flow.splitMode2.nativeCode, flow.crossoverHz, flow.routeAb,
+            flow.mergeLevelADb, flow.mergeLevelBDb, flow.mergePanA, flow.mergePanB, flow.invertPhaseB,
+        )
+        bridge.setDualPathRouting(
+            p1aTypes = b1a.map { it.nativeBlockCode }.toIntArray(),
+            p1aInst = b1a.map { it.instanceIndex }.toIntArray(),
+            p1bTypes = b1b.map { it.nativeBlockCode }.toIntArray(),
+            p1bInst = b1b.map { it.instanceIndex }.toIntArray(),
+            p2aTypes = b2a.map { it.nativeBlockCode }.toIntArray(),
+            p2aInst = b2a.map { it.instanceIndex }.toIntArray(),
+            p2bTypes = b2b.map { it.nativeBlockCode }.toIntArray(),
+            p2bInst = b2b.map { it.instanceIndex }.toIntArray(),
+            split1After = flow.split1AfterIndex,
+            split2After = flow.split2AfterIndex,
+            merge2At = flow.merge2AtIndex,
+            merge1bInto1a = flow.merge1bInto1a,
+            path1aFeeds2a = flow.path1aFeeds2a,
+        )
+    }
+
     private fun syncFullPresetToNative(preset: StadiumPreset) {
         val flow = preset.signalFlow
         bridge.enqueueCommand(DspCommandCode.SET_RIG_ROUTING_MODE, intVal = flow.routingMode)
         bridge.enqueueCommand(DspCommandCode.SET_GLOBAL_BPM, value0 = preset.globalBpm)
         bridge.enqueueCommand(DspCommandCode.SET_IO_TRIM_PAN, value0 = preset.inputTrimDb, value1 = preset.outputLevelDb, value2 = preset.outputPan)
-        bridge.setParallelSplitMerge(
-            flow.splitMode.nativeCode, flow.crossoverHz, flow.routeAb,
-            flow.mergeLevelADb, flow.mergeLevelBDb, flow.mergePanA, flow.mergePanB, flow.invertPhaseB,
-        )
-        flow.blocks.forEach { blk ->
-            dispatchBlockBypassToNative(blk, blk.enabled)
-            if (blk.category == BlockCategory.AMP) {
-                bridge.enqueueCommand(DspCommandCode.SET_AMP_MODEL, intVal = blk.modelId)
-            } else if (blk.category == BlockCategory.CAB) {
-                bridge.enqueueCommand(DspCommandCode.SET_CAB_SLOT_PARAM, targetId = 0, paramId = 1, intVal = blk.modelId)
-            }
-            blk.params.forEach { (k, v) -> dispatchBlockParamsToNative(blk, k, v) }
-        }
+        flow.blocks.forEach { blk -> syncSingleBlockToNative(blk) }
+        syncDualPathRoutingToNative(flow)
         preset.snapshots.forEachIndexed { idx, s ->
             var mask = 0
             if (s.blockEnabled["gate"] == true) mask = mask or (1 shl 0)
@@ -1053,27 +1464,47 @@ class StadiumRigViewModel(
         }
     }
 
+    private fun dispatchBlockModelToNative(blk: RigBlockState) {
+        val inst = blk.instanceIndex and 1
+        when (blk.nativeBlockCode) {
+            RigBlockCode.AMP -> bridge.enqueueCommand(DspCommandCode.SET_AMP_MODEL, flags = inst, intVal = blk.modelId)
+            RigBlockCode.CAB -> bridge.enqueueCommand(DspCommandCode.SET_CAB_SLOT_PARAM, targetId = 0, paramId = 1, flags = inst, intVal = blk.modelId)
+            RigBlockCode.DRIVE -> bridge.enqueueCommand(DspCommandCode.SET_DRIVE_FUZZ, paramId = 1, flags = inst, intVal = blk.modelId)
+            RigBlockCode.COMP -> bridge.enqueueCommand(DspCommandCode.SET_DYNAMICS, targetId = 1, paramId = 1, flags = inst, intVal = blk.modelId)
+            RigBlockCode.WAH -> bridge.enqueueCommand(DspCommandCode.SET_WAH_FILTER, paramId = 1, flags = inst, intVal = blk.modelId)
+            RigBlockCode.PITCH -> bridge.enqueueCommand(DspCommandCode.SET_PITCH_SYNTH, paramId = 1, flags = 0, intVal = blk.modelId)
+            RigBlockCode.EQ -> bridge.enqueueCommand(DspCommandCode.SET_EQ_PARAM, paramId = 1, flags = inst, intVal = blk.modelId)
+            RigBlockCode.MOD_PRE -> bridge.enqueueCommand(DspCommandCode.SET_MODULATION, targetId = 0, paramId = 1, flags = 0, intVal = blk.modelId)
+            RigBlockCode.MOD_POST -> bridge.enqueueCommand(DspCommandCode.SET_MODULATION, targetId = 1, paramId = 1, flags = 1, intVal = blk.modelId)
+            RigBlockCode.DELAY -> bridge.enqueueCommand(DspCommandCode.SET_DELAY_REVERB, targetId = 0, paramId = 1, flags = inst, intVal = blk.modelId)
+            RigBlockCode.REVERB -> bridge.enqueueCommand(DspCommandCode.SET_DELAY_REVERB, targetId = 1, paramId = 1, flags = inst, intVal = blk.modelId)
+        }
+    }
+
     private fun dispatchBlockBypassToNative(blk: RigBlockState, enabled: Boolean) {
         val en = if (enabled) 1 else 0
-        when (blk.id) {
-            "gate" -> bridge.enqueueCommand(DspCommandCode.SET_DYNAMICS, targetId = 0, paramId = 0, intVal = en)
-            "comp" -> bridge.enqueueCommand(DspCommandCode.SET_DYNAMICS, targetId = 1, paramId = 0, intVal = en)
-            "pitch" -> bridge.enqueueCommand(DspCommandCode.SET_PITCH_SYNTH, paramId = 0, intVal = en)
-            "wah" -> bridge.enqueueCommand(DspCommandCode.SET_WAH_FILTER, paramId = 0, intVal = en)
-            "drive" -> bridge.enqueueCommand(DspCommandCode.SET_DRIVE_FUZZ, paramId = 0, intVal = en)
-            "cab" -> bridge.enqueueCommand(DspCommandCode.SET_CAB_SLOT_PARAM, targetId = 0, paramId = 0, intVal = en)
-            "eq" -> bridge.enqueueCommand(DspCommandCode.SET_EQ_PARAM, paramId = 0, intVal = en)
-            "vol_pan" -> bridge.enqueueCommand(DspCommandCode.SET_VOLUME_PAN, paramId = 0, intVal = en)
-            "mod" -> bridge.enqueueCommand(DspCommandCode.SET_MODULATION, targetId = 1, paramId = 0, intVal = en)
-            "delay" -> bridge.enqueueCommand(DspCommandCode.SET_DELAY_REVERB, targetId = 0, paramId = 0, intVal = en)
-            "reverb" -> bridge.enqueueCommand(DspCommandCode.SET_DELAY_REVERB, targetId = 1, paramId = 0, intVal = en)
+        val inst = blk.instanceIndex and 1
+        when (blk.nativeBlockCode) {
+            RigBlockCode.GATE -> bridge.enqueueCommand(DspCommandCode.SET_DYNAMICS, targetId = 0, paramId = 0, flags = inst, intVal = en)
+            RigBlockCode.COMP -> bridge.enqueueCommand(DspCommandCode.SET_DYNAMICS, targetId = 1, paramId = 0, flags = inst, intVal = en)
+            RigBlockCode.PITCH -> bridge.enqueueCommand(DspCommandCode.SET_PITCH_SYNTH, paramId = 0, flags = 0, intVal = en)
+            RigBlockCode.WAH -> bridge.enqueueCommand(DspCommandCode.SET_WAH_FILTER, paramId = 0, flags = inst, intVal = en)
+            RigBlockCode.DRIVE -> bridge.enqueueCommand(DspCommandCode.SET_DRIVE_FUZZ, paramId = 0, flags = inst, intVal = en)
+            RigBlockCode.CAB -> bridge.enqueueCommand(DspCommandCode.SET_CAB_SLOT_PARAM, targetId = 0, paramId = 0, flags = inst, intVal = en)
+            RigBlockCode.EQ -> bridge.enqueueCommand(DspCommandCode.SET_EQ_PARAM, paramId = 0, flags = inst, intVal = en)
+            RigBlockCode.VOL_PAN -> bridge.enqueueCommand(DspCommandCode.SET_VOLUME_PAN, paramId = 0, flags = inst, intVal = en)
+            RigBlockCode.MOD_PRE -> bridge.enqueueCommand(DspCommandCode.SET_MODULATION, targetId = 0, paramId = 0, flags = 0, intVal = en)
+            RigBlockCode.MOD_POST -> bridge.enqueueCommand(DspCommandCode.SET_MODULATION, targetId = 1, paramId = 0, flags = 1, intVal = en)
+            RigBlockCode.DELAY -> bridge.enqueueCommand(DspCommandCode.SET_DELAY_REVERB, targetId = 0, paramId = 0, flags = inst, intVal = en)
+            RigBlockCode.REVERB -> bridge.enqueueCommand(DspCommandCode.SET_DELAY_REVERB, targetId = 1, paramId = 0, flags = inst, intVal = en)
         }
     }
 
     private fun dispatchBlockParamsToNative(blk: RigBlockState, key: String, value: Float) {
         val p = blk.params
-        when (blk.id) {
-            "amp" -> {
+        val inst = blk.instanceIndex and 1
+        when (blk.nativeBlockCode) {
+            RigBlockCode.AMP -> {
                 val pid = when (key) {
                     "amp.drive" -> 0; "amp.bass" -> 1; "amp.mid" -> 2; "amp.treble" -> 3
                     "amp.presence" -> 4; "amp.master" -> 5; "amp.ch_vol" -> 6; "amp.sag" -> 7
@@ -1081,58 +1512,67 @@ class StadiumRigViewModel(
                     "amp.deep" -> 13; "amp.cut" -> 14; "amp.geq_v_scoop" -> 15
                     else -> -1
                 }
-                if (pid >= 0) bridge.enqueueCommand(DspCommandCode.SET_AMP_PARAM, paramId = pid, value0 = value)
+                if (pid >= 0) bridge.enqueueCommand(DspCommandCode.SET_AMP_PARAM, paramId = pid, flags = inst, value0 = value)
             }
-            "cab" -> {
+            RigBlockCode.CAB -> {
                 val pid = when (key) {
                     "cab.position" -> 3; "cab.distance_inch" -> 4; "cab.angle_deg" -> 5
                     "cab.low_cut_hz" -> 6; "cab.high_cut_hz" -> 7; "cab.level_db" -> 8; "cab.pan" -> 9
                     else -> -1
                 }
-                if (pid >= 0) bridge.enqueueCommand(DspCommandCode.SET_CAB_SLOT_PARAM, targetId = 0, paramId = pid, value0 = value)
+                if (pid >= 0) bridge.enqueueCommand(DspCommandCode.SET_CAB_SLOT_PARAM, targetId = 0, paramId = pid, flags = inst, value0 = value)
             }
-            "drive" -> bridge.enqueueCommand(
-                DspCommandCode.SET_DRIVE_FUZZ, paramId = 2,
+            RigBlockCode.DRIVE -> bridge.enqueueCommand(
+                DspCommandCode.SET_DRIVE_FUZZ, paramId = 2, flags = inst,
                 value0 = p["drive.drive"] ?: 0.45f, value1 = p["drive.tone"] ?: 0.55f, value2 = p["drive.level"] ?: 0.65f,
             )
-            "gate" -> bridge.enqueueCommand(
-                DspCommandCode.SET_DYNAMICS, targetId = 0, paramId = 1,
+            RigBlockCode.GATE -> bridge.enqueueCommand(
+                DspCommandCode.SET_DYNAMICS, targetId = 0, paramId = 1, flags = inst,
                 value0 = p["gate.threshold_db"] ?: -52f, value1 = p["gate.decay_ms"] ?: 45f,
             )
-            "comp" -> bridge.enqueueCommand(
-                DspCommandCode.SET_DYNAMICS, targetId = 1, paramId = 2,
+            RigBlockCode.COMP -> bridge.enqueueCommand(
+                DspCommandCode.SET_DYNAMICS, targetId = 1, paramId = 2, flags = inst,
                 value0 = p["comp.peak_reduction"] ?: 0.45f, value1 = p["comp.gain_db"] ?: 4f, value2 = p["comp.mix"] ?: 0.85f,
             )
-            "wah" -> bridge.enqueueCommand(
-                DspCommandCode.SET_WAH_FILTER, paramId = 2,
+            RigBlockCode.WAH -> bridge.enqueueCommand(
+                DspCommandCode.SET_WAH_FILTER, paramId = 2, flags = inst,
                 value0 = p["wah.position"] ?: 0.5f, value1 = p["wah.q_resonance"] ?: 0.55f, value2 = p["wah.mix"] ?: 1f,
             )
-            "mod" -> bridge.enqueueCommand(
-                DspCommandCode.SET_MODULATION, targetId = 1, paramId = 2,
+            RigBlockCode.MOD_PRE, RigBlockCode.MOD_POST -> bridge.enqueueCommand(
+                DspCommandCode.SET_MODULATION,
+                targetId = if (blk.nativeBlockCode == RigBlockCode.MOD_PRE) 0 else 1,
+                paramId = 2,
+                flags = if (blk.nativeBlockCode == RigBlockCode.MOD_PRE) 0 else 1,
                 value0 = p["mod.rate_hz"] ?: 1.2f, value1 = p["mod.depth"] ?: 0.55f, value2 = p["mod.mix"] ?: 0.45f,
             )
-            "pitch" -> bridge.enqueueCommand(
-                DspCommandCode.SET_PITCH_SYNTH, paramId = 2,
+            RigBlockCode.PITCH -> bridge.enqueueCommand(
+                DspCommandCode.SET_PITCH_SYNTH, paramId = 2, flags = 0,
                 value0 = p["pitch.semitones"] ?: 0f, value1 = p["pitch.pedal_pos"] ?: 0f, value2 = p["pitch.mix"] ?: 0.5f,
             )
-            "delay" -> bridge.enqueueCommand(
-                DspCommandCode.SET_DELAY_REVERB, targetId = 0, paramId = 2,
+            RigBlockCode.DELAY -> bridge.enqueueCommand(
+                DspCommandCode.SET_DELAY_REVERB, targetId = 0, paramId = 2, flags = inst,
                 value0 = p["delay.time_ms"] ?: 380f, value1 = p["delay.feedback"] ?: 0.42f, value2 = p["delay.mix"] ?: 0.30f,
             )
-            "reverb" -> bridge.enqueueCommand(
-                DspCommandCode.SET_DELAY_REVERB, targetId = 1, paramId = 2,
-                value0 = p["reverb.decay"] ?: 0.56f, value1 = p["reverb.damping_hz"] ?: 4600f, value2 = p["reverb.mix"] ?: 0.28f,
-            )
-            "vol_pan" -> bridge.enqueueCommand(
-                DspCommandCode.SET_VOLUME_PAN, paramId = 1,
+            RigBlockCode.REVERB -> {
+                bridge.enqueueCommand(
+                    DspCommandCode.SET_DELAY_REVERB, targetId = 1, paramId = 2, flags = inst,
+                    value0 = p["reverb.decay"] ?: 0.56f, value1 = p["reverb.damping_hz"] ?: 4600f, value2 = p["reverb.mix"] ?: 0.28f,
+                )
+                bridge.enqueueCommand(
+                    DspCommandCode.SET_DELAY_REVERB, targetId = 1, paramId = 3, flags = inst,
+                    value0 = p["reverb.predelay_ms"] ?: 22f, value1 = p["reverb.shimmer_amount"] ?: 0.25f, value2 = 0.25f,
+                )
+            }
+            RigBlockCode.VOL_PAN -> bridge.enqueueCommand(
+                DspCommandCode.SET_VOLUME_PAN, paramId = 1, flags = inst,
                 value0 = p["vol.position"] ?: 1f, value1 = p["vol.pan"] ?: 0f, value2 = p["vol.stereo_width"] ?: 1f, intVal = 1,
             )
-            "eq" -> {
-                bridge.enqueueCommand(DspCommandCode.SET_EQ_PARAM, paramId = 2, value0 = p["eq.low_freq"] ?: 120f, value1 = p["eq.low_gain_db"] ?: 0f, value2 = p["eq.low_q"] ?: 0.8f)
-                bridge.enqueueCommand(DspCommandCode.SET_EQ_PARAM, paramId = 3, value0 = p["eq.mid1_freq"] ?: 650f, value1 = p["eq.mid1_gain_db"] ?: 0f, value2 = p["eq.mid1_q"] ?: 1.2f)
-                bridge.enqueueCommand(DspCommandCode.SET_EQ_PARAM, paramId = 4, value0 = p["eq.mid2_freq"] ?: 2400f, value1 = p["eq.mid2_gain_db"] ?: 0f, value2 = p["eq.mid2_q"] ?: 1.2f)
-                bridge.enqueueCommand(DspCommandCode.SET_EQ_PARAM, paramId = 5, value0 = p["eq.high_freq"] ?: 6500f, value1 = p["eq.high_gain_db"] ?: 0f, value2 = p["eq.high_q"] ?: 0.8f)
-                bridge.enqueueCommand(DspCommandCode.SET_EQ_PARAM, paramId = 7, value0 = p["eq.tilt_db"] ?: 0f, value1 = 900f)
+            RigBlockCode.EQ -> {
+                bridge.enqueueCommand(DspCommandCode.SET_EQ_PARAM, paramId = 2, flags = inst, value0 = p["eq.low_freq"] ?: 120f, value1 = p["eq.low_gain_db"] ?: 0f, value2 = p["eq.low_q"] ?: 0.8f)
+                bridge.enqueueCommand(DspCommandCode.SET_EQ_PARAM, paramId = 3, flags = inst, value0 = p["eq.mid1_freq"] ?: 650f, value1 = p["eq.mid1_gain_db"] ?: 0f, value2 = p["eq.mid1_q"] ?: 1.2f)
+                bridge.enqueueCommand(DspCommandCode.SET_EQ_PARAM, paramId = 4, flags = inst, value0 = p["eq.mid2_freq"] ?: 2400f, value1 = p["eq.mid2_gain_db"] ?: 0f, value2 = p["eq.mid2_q"] ?: 1.2f)
+                bridge.enqueueCommand(DspCommandCode.SET_EQ_PARAM, paramId = 5, flags = inst, value0 = p["eq.high_freq"] ?: 6500f, value1 = p["eq.high_gain_db"] ?: 0f, value2 = p["eq.high_q"] ?: 0.8f)
+                bridge.enqueueCommand(DspCommandCode.SET_EQ_PARAM, paramId = 7, flags = inst, value0 = p["eq.tilt_db"] ?: 0f, value1 = 900f)
             }
         }
     }

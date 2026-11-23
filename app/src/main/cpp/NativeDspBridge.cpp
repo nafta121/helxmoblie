@@ -166,6 +166,58 @@ Java_com_cleanroom_stadiumdsp_NativeDspBridge_nativeSetParallelSplitMerge(
 }
 
 JNIEXPORT void JNICALL
+Java_com_cleanroom_stadiumdsp_NativeDspBridge_nativeSetSecondaryParallelSplitMerge(
+    JNIEnv* /*env*/, jobject /*thiz*/, jint mode, jfloat crossover_hz, jfloat route_ab,
+    jfloat lvl_a_db, jfloat lvl_b_db, jfloat pan_a, jfloat pan_b, jboolean invert_b) {
+    const auto sm = static_cast<stadium_dsp::SplitMode>(std::max(0, std::min(mode, 3)));
+    Engine().GetProcessor().SetSecondaryParallelSplitMerge(sm, crossover_hz, route_ab, lvl_a_db,
+                                                           lvl_b_db, pan_a, pan_b,
+                                                           invert_b == JNI_TRUE);
+}
+
+JNIEXPORT void JNICALL
+Java_com_cleanroom_stadiumdsp_NativeDspBridge_nativeSetDualPathRouting(
+    JNIEnv* env, jobject /*thiz*/,
+    jintArray p1a_types, jintArray p1a_inst,
+    jintArray p1b_types, jintArray p1b_inst,
+    jintArray p2a_types, jintArray p2a_inst,
+    jintArray p2b_types, jintArray p2b_inst,
+    jint split1_after, jint split2_after, jint merge2_at,
+    jboolean merge_1b_into_1a, jboolean path_1a_feeds_2a) {
+    auto fill_branch = [&](jintArray types_arr, jintArray inst_arr,
+                           std::array<stadium_dsp::RoutingSlotRef, 8>& dst, uint8_t& out_count) {
+        out_count = 0;
+        if (!types_arr || !inst_arr) return;
+        const jsize n = std::min<jsize>(std::min(env->GetArrayLength(types_arr),
+                                                 env->GetArrayLength(inst_arr)), 8);
+        if (n <= 0) return;
+        jint t_buf[8] = {};
+        jint i_buf[8] = {};
+        env->GetIntArrayRegion(types_arr, 0, n, t_buf);
+        env->GetIntArrayRegion(inst_arr, 0, n, i_buf);
+        for (jsize k = 0; k < n; ++k) {
+            if (t_buf[k] >= 0 && t_buf[k] < static_cast<jint>(stadium_dsp::RigBlockType::kCount)) {
+                dst[out_count].type = static_cast<stadium_dsp::RigBlockType>(t_buf[k]);
+                dst[out_count].instance_idx = static_cast<uint8_t>(i_buf[k] & 1);
+                ++out_count;
+            }
+        }
+    };
+
+    stadium_dsp::DualPathRoutingPlan plan;
+    fill_branch(p1a_types, p1a_inst, plan.path_1a, plan.count_1a);
+    fill_branch(p1b_types, p1b_inst, plan.path_1b, plan.count_1b);
+    fill_branch(p2a_types, p2a_inst, plan.path_2a, plan.count_2a);
+    fill_branch(p2b_types, p2b_inst, plan.path_2b, plan.count_2b);
+    plan.split_1_after_index = static_cast<uint8_t>(std::max(0, std::min<int>(split1_after, 8)));
+    plan.split_2_after_index = static_cast<uint8_t>(std::max(0, std::min<int>(split2_after, 8)));
+    plan.merge_2_at_index = static_cast<uint8_t>(std::max(0, std::min<int>(merge2_at, 8)));
+    plan.merge_1b_into_1a = (merge_1b_into_1a == JNI_TRUE);
+    plan.path_1a_feeds_2a = (path_1a_feeds_2a == JNI_TRUE);
+    Engine().GetProcessor().SetDualPathRouting(plan);
+}
+
+JNIEXPORT void JNICALL
 Java_com_cleanroom_stadiumdsp_NativeDspBridge_nativeStoreSnapshot(
     JNIEnv* env, jobject /*thiz*/, jint idx, jint bypass_mask, jfloatArray params11) {
     if (idx < 0 || idx >= 8 || !params11 || env->GetArrayLength(params11) < 11) return;

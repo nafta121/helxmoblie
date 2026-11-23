@@ -26,7 +26,7 @@ class PresetRepository(
             id = "live_default",
             name = "Friday Night Live Set",
             entries = listOf(
-                SetlistEntry("factory_01a", "Opening Anthem (Brit 2203)", 124f, "Snapshot 1 Clean -> 3 Rhythm -> 4 Solo"),
+                SetlistEntry("factory_01a", "Space Cadet (Essex TB30CC)", 165f, "Dual-Path 1A/1B -> 2A/2B • Snapshots 1-4"),
                 SetlistEntry("factory_02a", "Shimmer Worship Swell", 74f, "Use EXP 2 for ambient volume swells"),
                 SetlistEntry("factory_03a", "Thrash Tight Mark IIC+", 176f, "Horizon Gate ON, V-Scoop 75%"),
                 SetlistEntry("factory_04a", "Texas Tweed Blues", 96f, "Teemah! + '63 Spring Drip"),
@@ -113,7 +113,14 @@ class PresetRepository(
     private fun buildCuratedFactoryBank(): List<StadiumPreset> = listOf(
         StadiumPreset.createDefaultPreset(),
         StadiumPreset(
-            id = "factory_01b", bankCode = "01B", name = "US Double Blackface Clean",
+            id = "factory_01b", bankCode = "01B", name = "Brit 2203 Stadium Crunch",
+            categoryTag = "Rock", presetInfo = "Classic JCM800 2203 pushed by Minotaur Klon into 4x12 Brit V30 + Cosmos Echo & '63 Spring.",
+            isFactory = true, globalBpm = 124f,
+            signalFlow = SignalFlowState(blocks = StadiumPreset.defaultBlocks()),
+            snapshots = StadiumPreset.default8Snapshots(),
+        ),
+        StadiumPreset(
+            id = "factory_01c", bankCode = "01C", name = "US Double Blackface Clean",
             categoryTag = "Clean", presetInfo = "Fender Twin Reverb AB763 + LA-2A Opto + 2x12 Jensen + Glitz ambient bloom.",
             isFactory = true, globalBpm = 92f,
             signalFlow = SignalFlowState(

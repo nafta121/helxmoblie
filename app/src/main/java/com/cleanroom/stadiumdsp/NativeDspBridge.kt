@@ -176,6 +176,14 @@ interface DspBridgeGateway {
     fun computeEqCurveDb(outBuffer: FloatArray)
     fun computeCabSpectrumDb(slot: Int, outBuffer: FloatArray)
     fun setDynamicSlotOrder(order12: IntArray)
+    fun setDualPathRouting(
+        p1aTypes: IntArray, p1aInst: IntArray,
+        p1bTypes: IntArray, p1bInst: IntArray,
+        p2aTypes: IntArray, p2aInst: IntArray,
+        p2bTypes: IntArray, p2bInst: IntArray,
+        split1After: Int, split2After: Int, merge2At: Int,
+        merge1bInto1a: Boolean, path1aFeeds2a: Boolean,
+    ) {}
     fun setParallelSplitMerge(
         mode: Int,
         crossoverHz: Float,
@@ -186,6 +194,16 @@ interface DspBridgeGateway {
         panB: Float,
         invertB: Boolean,
     )
+    fun setSecondaryParallelSplitMerge(
+        mode: Int,
+        crossoverHz: Float,
+        routeAb: Float,
+        lvlADb: Float,
+        lvlBDb: Float,
+        panA: Float,
+        panB: Float,
+        invertB: Boolean,
+    ) {}
     fun storeSnapshot(idx: Int, bypassMask: Int, params11: FloatArray)
     fun recallSnapshot(idx: Int)
     fun registerTapTempoMs(timestampMs: Long): Float
@@ -237,7 +255,25 @@ object NativeDspBridge : DspBridgeGateway {
     private external fun nativeComputeEqCurveDb(outDb: FloatArray)
     private external fun nativeComputeCabSpectrumDb(slot: Int, outDb: FloatArray)
     private external fun nativeSetDynamicSlotOrder(order12: IntArray)
+    private external fun nativeSetDualPathRouting(
+        p1aTypes: IntArray, p1aInst: IntArray,
+        p1bTypes: IntArray, p1bInst: IntArray,
+        p2aTypes: IntArray, p2aInst: IntArray,
+        p2bTypes: IntArray, p2bInst: IntArray,
+        split1After: Int, split2After: Int, merge2At: Int,
+        merge1bInto1a: Boolean, path1aFeeds2a: Boolean,
+    )
     private external fun nativeSetParallelSplitMerge(
+        mode: Int,
+        crossoverHz: Float,
+        routeAb: Float,
+        lvlADb: Float,
+        lvlBDb: Float,
+        panA: Float,
+        panB: Float,
+        invertB: Boolean,
+    )
+    private external fun nativeSetSecondaryParallelSplitMerge(
         mode: Int,
         crossoverHz: Float,
         routeAb: Float,
@@ -335,6 +371,22 @@ object NativeDspBridge : DspBridgeGateway {
         if (isNativeAvailable) nativeSetDynamicSlotOrder(order12)
     }
 
+    override fun setDualPathRouting(
+        p1aTypes: IntArray, p1aInst: IntArray,
+        p1bTypes: IntArray, p1bInst: IntArray,
+        p2aTypes: IntArray, p2aInst: IntArray,
+        p2bTypes: IntArray, p2bInst: IntArray,
+        split1After: Int, split2After: Int, merge2At: Int,
+        merge1bInto1a: Boolean, path1aFeeds2a: Boolean,
+    ) {
+        if (isNativeAvailable) {
+            nativeSetDualPathRouting(
+                p1aTypes, p1aInst, p1bTypes, p1bInst, p2aTypes, p2aInst, p2bTypes, p2bInst,
+                split1After, split2After, merge2At, merge1bInto1a, path1aFeeds2a,
+            )
+        }
+    }
+
     override fun setParallelSplitMerge(
         mode: Int,
         crossoverHz: Float,
@@ -347,6 +399,21 @@ object NativeDspBridge : DspBridgeGateway {
     ) {
         if (isNativeAvailable) {
             nativeSetParallelSplitMerge(mode, crossoverHz, routeAb, lvlADb, lvlBDb, panA, panB, invertB)
+        }
+    }
+
+    override fun setSecondaryParallelSplitMerge(
+        mode: Int,
+        crossoverHz: Float,
+        routeAb: Float,
+        lvlADb: Float,
+        lvlBDb: Float,
+        panA: Float,
+        panB: Float,
+        invertB: Boolean,
+    ) {
+        if (isNativeAvailable) {
+            nativeSetSecondaryParallelSplitMerge(mode, crossoverHz, routeAb, lvlADb, lvlBDb, panA, panB, invertB)
         }
     }
 
