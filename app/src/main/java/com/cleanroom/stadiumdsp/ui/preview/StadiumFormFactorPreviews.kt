@@ -75,3 +75,63 @@ fun StadiumRigFormFactorPreview() {
         )
     }
 }
+
+@Preview(name = "6. Tablet Landscape (Browser Auto-Closed)", device = Devices.TABLET, showBackground = true)
+@Composable
+fun StadiumRigBrowserAutoClosedPreview() {
+    val previewState = StadiumUiState(isModelBrowserOpen = false)
+    val previewTelemetry = MutableStateFlow(
+        LiveTelemetryUi(inPeakDb = -12.0f, outPeakLDb = -5.5f, outPeakRDb = -5.8f, rtCpuLoadPct = 8.4f)
+    )
+    StadiumDspTheme {
+        StadiumRigAdaptiveContent(
+            state = previewState,
+            telemetryFlow = previewTelemetry,
+            onImportExternalAsset = {},
+            onApplyAudioSettings = {},
+            onStartAudio = {},
+            onStepPreset = {},
+            onSelectPreset = {},
+            onSaveUserPreset = {},
+            onSelectSnapshot = {},
+            onToggleDiscardEdits = {},
+            onToggleStageLock = {},
+            onToggleMasterMute = {},
+            onTogglePresetClip = {},
+            onSelectPresetClipStyle = {},
+            onTapTempo = {},
+            onUndo = {},
+            onRedo = {},
+            onToggleCompareAB = {},
+            onCopyAB = {},
+            onSelectBlock = {},
+            onToggleBypass = {},
+            onToggleStereo = {},
+            onMoveBlock = { _, _ -> },
+            onCycleSplitMode = {},
+            onSelectAmpModel = {},
+            onSelectCabModel = {},
+            onSelectMicModel = {},
+            onSelectFxModel = { _, _, _, _ -> },
+            onUpdateParam = { _, _, _ -> },
+            onToggleSnapshotControl = {},
+            onArmMidiLearn = {},
+            onUpdateFocusXY = { _, _, _ -> },
+            onResetCenter = {},
+            onFactoryDefault = {},
+            onUserDefault = {},
+            onSaveUserDefault = {},
+            onAddFavorite = {},
+            onToggleAmpCabLink = {},
+            onToggleCabCabLink = {},
+            onSelectLiveMode = {},
+            onTriggerPad = {},
+            onSelectExpSlot = {},
+            onExpMoved = { _, _ -> },
+            onToggleShowcase = {},
+            onToggleStopwatch = {},
+            onResetStopwatch = {},
+            onUpdateTunerConfig = {},
+        )
+    }
+}

@@ -3,19 +3,18 @@ package com.cleanroom.stadiumdsp.ui.components
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -24,9 +23,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.KeyboardArrowUp
 import androidx.compose.material.icons.rounded.Lock
-import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Settings
-import com.cleanroom.stadiumdsp.ui.theme.StadiumIcons
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -49,6 +46,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -62,6 +61,7 @@ import com.cleanroom.stadiumdsp.audio.BufferSizeMode
 import com.cleanroom.stadiumdsp.audio.OboeSessionController
 import com.cleanroom.stadiumdsp.ui.state.StadiumUiState
 import com.cleanroom.stadiumdsp.ui.theme.StadiumColors
+import com.cleanroom.stadiumdsp.ui.theme.StadiumIcons
 import kotlinx.coroutines.flow.StateFlow
 import kotlin.math.roundToInt
 
@@ -88,91 +88,133 @@ fun StadiumTopInstanceBar(
     onLiveBufferChange: (Int, BufferSizeMode, Int) -> Unit = { _, _, _ -> },
     onResetBufferMin: () -> Unit = {},
     onRefreshAudioDevices: () -> Unit = {},
+    onInputTrimChange: (Float) -> Unit = {},
+    onOutputLevelChange: (Float) -> Unit = {},
+    onDismissModelBrowser: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     var showSettingsDialog by rememberSaveable { mutableStateOf(false) }
-    var showSnapshotRibbon by rememberSaveable { mutableStateOf(!compactMode) }
+    var showSnapshotRibbon by rememberSaveable { mutableStateOf(false) }
+    var showPresetInfoDialog by rememberSaveable { mutableStateOf(false) }
 
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .background(StadiumColors.SurfaceBar)
-            .border(width = 1.dp, color = StadiumColors.BorderSubtle),
+            .background(Color(0xFF141414))
+            .pointerInput(Unit) {
+                detectTapGestures(onTap = { onDismissModelBrowser() })
+            },
     ) {
-        // Primary Instance Bar Row
+        // Primary Helix Stadium Native Top Bar (#141414 — 1:1 visual parity with reference)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 8.dp, vertical = 6.dp),
+                .height(46.dp)
+                .padding(horizontal = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            // Left: Live Input Mini Meter + A/B + Undo/Redo (compact hides A/B & Undo into overflow)
-            if (!compactMode) {
-                HeaderInputMiniMeter(
-                    telemetryFlow = telemetryFlow,
-                    trimDb = state.activePreset.inputTrimDb,
-                )
+            // Far Left: Metallic Rotary Input Trim Knob (drag vertically, double-tap resets 0.0 dB)
+            MetallicRotaryKnob(
+                valueDb = state.activePreset.inputTrimDb,
+                sizeDp = if (compactMode) 28.dp else 32.dp,
+                onValueChange = onInputTrimChange,
+            )
 
+            // Left Controls: A -> B Compare + Undo / Redo (hidden in very narrow compact mode)
+            if (!compactMode) {
                 Row(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(StadiumColors.SurfaceDeep)
-                        .border(1.dp, StadiumColors.BorderSubtle, RoundedCornerShape(6.dp))
-                        .padding(horizontal = 4.dp, vertical = 3.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
-                    CompactPillToggle("A", !state.isCompareSlotB, onClick = { if (state.isCompareSlotB) onToggleCompareAB() })
-                    CompactPillToggle("B", state.isCompareSlotB, onClick = { if (!state.isCompareSlotB) onToggleCompareAB() })
-                    Box(
+                    Text(
+                        text = "A",
+                        color = if (!state.isCompareSlotB) Color.White else StadiumColors.TextMuted,
+                        fontSize = 13.sp,
+                        fontWeight = if (!state.isCompareSlotB) FontWeight.Bold else FontWeight.Normal,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(4.dp))
+                            .clickable { if (state.isCompareSlotB) onToggleCompareAB() }
+                            .padding(horizontal = 4.dp, vertical = 2.dp),
+                    )
+                    Text(
+                        text = "→",
+                        color = StadiumColors.TextSecondary,
+                        fontSize = 12.sp,
                         modifier = Modifier
                             .clip(RoundedCornerShape(4.dp))
                             .clickable(onClick = onCopyAB)
+                            .padding(horizontal = 2.dp, vertical = 2.dp),
+                    )
+                    Text(
+                        text = "B",
+                        color = if (state.isCompareSlotB) Color.White else StadiumColors.TextMuted,
+                        fontSize = 13.sp,
+                        fontWeight = if (state.isCompareSlotB) FontWeight.Bold else FontWeight.Normal,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(4.dp))
+                            .clickable { if (!state.isCompareSlotB) onToggleCompareAB() }
                             .padding(horizontal = 4.dp, vertical = 2.dp),
-                    ) {
-                        Text("CPY", style = MaterialTheme.typography.labelSmall, color = StadiumColors.TextMuted)
-                    }
-                    Box(Modifier.width(1.dp).height(14.dp).background(StadiumColors.BorderSubtle))
+                    )
+
+                    Spacer(Modifier.width(4.dp))
+
                     Icon(
                         imageVector = StadiumIcons.Undo,
                         contentDescription = "Undo",
-                        tint = if (state.canUndo) StadiumColors.TextPrimary else StadiumColors.TextMuted.copy(alpha = 0.4f),
+                        tint = if (state.canUndo) Color.White else StadiumColors.TextMuted.copy(alpha = 0.45f),
                         modifier = Modifier
-                            .size(22.dp)
-                            .clickable(enabled = state.canUndo, onClick = onUndo)
-                            .padding(2.dp),
+                            .size(18.dp)
+                            .clickable(enabled = state.canUndo, onClick = onUndo),
                     )
                     Icon(
                         imageVector = StadiumIcons.Redo,
                         contentDescription = "Redo",
-                        tint = if (state.canRedo) StadiumColors.TextPrimary else StadiumColors.TextMuted.copy(alpha = 0.4f),
+                        tint = if (state.canRedo) Color.White else StadiumColors.TextMuted.copy(alpha = 0.45f),
                         modifier = Modifier
-                            .size(22.dp)
-                            .clickable(enabled = state.canRedo, onClick = onRedo)
-                            .padding(2.dp),
+                            .size(18.dp)
+                            .clickable(enabled = state.canRedo, onClick = onRedo),
                     )
                 }
             }
 
-            // Center: Helix Stadium Preset Pill + White/Red Camera Snapshot + Preset Clip Transport
+            // Center Dark Inset Capsule: [••• | ⇕ Space Cadet       [Camera 1] [Clip] [(i)]]
             Row(
                 modifier = Modifier
                     .weight(1f)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(StadiumColors.CanvasBlack)
-                    .border(1.dp, StadiumColors.BorderStrong, RoundedCornerShape(8.dp))
-                    .padding(horizontal = 6.dp, vertical = 4.dp),
+                    .height(34.dp)
+                    .clip(RoundedCornerShape(5.dp))
+                    .background(Color(0xFF0A0A0A))
+                    .border(1.dp, Color(0xFF252525), RoundedCornerShape(5.dp))
+                    .padding(horizontal = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                // ••• Preset Menu button
+                Text(
+                    text = "•••",
+                    color = StadiumColors.TextSecondary,
+                    fontSize = 11.sp,
+                    letterSpacing = 1.sp,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(4.dp))
+                        .clickable(onClick = onOpenPresets)
+                        .padding(horizontal = 4.dp, vertical = 4.dp),
+                )
+
+                Box(Modifier.width(1.dp).height(18.dp).background(Color(0xFF242424)))
+
+                // Up / Down Preset Stepper Chevrons (⇕)
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy((-4).dp),
+                ) {
                     Icon(
                         imageVector = Icons.Rounded.KeyboardArrowUp,
                         contentDescription = "Previous Preset",
                         tint = StadiumColors.TextSecondary,
                         modifier = Modifier
-                            .size(16.dp)
+                            .size(15.dp)
                             .clickable { onStepPreset(-1) },
                     )
                     Icon(
@@ -180,210 +222,162 @@ fun StadiumTopInstanceBar(
                         contentDescription = "Next Preset",
                         tint = StadiumColors.TextSecondary,
                         modifier = Modifier
-                            .size(16.dp)
+                            .size(15.dp)
                             .clickable { onStepPreset(+1) },
                     )
                 }
 
-                Row(
+                // Preset Title ("Space Cadet" — clean light white sans-serif)
+                Text(
+                    text = state.activePreset.name,
+                    color = Color(0xFFEDF2F7),
+                    fontSize = if (compactMode) 14.sp else 16.sp,
+                    fontWeight = FontWeight.Normal,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                     modifier = Modifier
                         .weight(1f)
                         .clickable(onClick = onOpenPresets),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(4.dp))
-                            .background(StadiumColors.SurfaceSliderTrack)
-                            .padding(horizontal = 5.dp, vertical = 2.dp),
-                    ) {
-                        Text(
-                            text = state.activePreset.bankCode,
-                            style = MaterialTheme.typography.labelMedium,
-                            color = StadiumColors.BadgeCyan,
-                        )
-                    }
-                    Text(
-                        text = state.activePreset.name,
-                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Light),
-                        color = StadiumColors.TextPresetTitle,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
+                )
 
-                // Snapshot Camera Indicator (White = Auto-Remember, Red = Discard Edits)
-                Row(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(StadiumColors.SurfaceCard)
-                        .border(
-                            1.dp,
-                            if (state.snapshotDiscardEdits) StadiumColors.AmpRed else StadiumColors.BorderStrong,
-                            RoundedCornerShape(6.dp),
-                        )
-                        .clickable { showSnapshotRibbon = !showSnapshotRibbon }
-                        .padding(horizontal = 7.dp, vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    Icon(
-                        imageVector = StadiumIcons.Camera,
-                        contentDescription = "Snapshot Camera Mode",
-                        tint = if (state.snapshotDiscardEdits) StadiumColors.AmpRed else Color.White,
-                        modifier = Modifier.size(14.dp),
-                    )
-                    Text(
-                        text = "S${state.activeSnapshotIndex + 1}",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = Color.White,
-                    )
-                }
-
-                // Preset Clip Dry DI Audition Transport Button
-                Row(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(if (state.isPresetClipPlaying) StadiumColors.DelayEmerald.copy(alpha = 0.2f) else StadiumColors.SurfaceCard)
-                        .border(
-                            1.dp,
-                            if (state.isPresetClipPlaying) StadiumColors.DelayEmerald else StadiumColors.BorderSubtle,
-                            RoundedCornerShape(6.dp),
-                        )
-                        .clickable(onClick = onTogglePresetClip)
-                        .padding(horizontal = 7.dp, vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(3.dp),
-                ) {
-                    Icon(
-                        imageVector = if (state.isPresetClipPlaying) StadiumIcons.Pause else Icons.Rounded.PlayArrow,
-                        contentDescription = "Preset Clip Audition",
-                        tint = if (state.isPresetClipPlaying) StadiumColors.DelayEmerald else StadiumColors.TextSecondary,
-                        modifier = Modifier.size(15.dp),
-                    )
-                    if (!compactMode) {
-                        Text(
-                            text = "Clip",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = if (state.isPresetClipPlaying) StadiumColors.DelayEmerald else StadiumColors.TextSecondary,
-                        )
-                    }
-                }
-            }
-
-            // Right: TAP Tempo, Stage Lock, Settings, & Panic MUTE ALL
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(5.dp),
-            ) {
-                // TAP Tempo button
-                Row(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(StadiumColors.SurfaceDeep)
-                        .border(1.dp, StadiumColors.BorderStrong, RoundedCornerShape(6.dp))
-                        .clickable(onClick = onTapTempo)
-                        .padding(horizontal = 8.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(7.dp)
-                            .clip(CircleShape)
-                            .background(StadiumColors.DelayEmerald),
-                    )
-                    Text(
-                        text = String.format("%.0f", state.activePreset.globalBpm),
-                        style = MaterialTheme.typography.labelMedium,
-                        color = StadiumColors.TextPrimary,
-                    )
-                    if (!compactMode) {
-                        Text("TAP", style = MaterialTheme.typography.labelSmall, color = StadiumColors.TextMuted)
-                    }
-                }
-
-                // Stage Lock button (also engages Red Camera Discard Edits)
-                Row(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(if (state.stageLock) StadiumColors.DistortionAmber.copy(alpha = 0.2f) else StadiumColors.SurfaceCard)
-                        .border(
-                            1.dp,
-                            if (state.stageLock) StadiumColors.DistortionAmber else StadiumColors.BorderStrong,
-                            RoundedCornerShape(6.dp),
-                        )
-                        .clickable(onClick = onToggleStageLock)
-                        .padding(horizontal = 7.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(3.dp),
-                ) {
-                    Icon(
-                        imageVector = if (state.stageLock) Icons.Rounded.Lock else StadiumIcons.LockOpen,
-                        contentDescription = "Stage Lock",
-                        tint = if (state.stageLock) StadiumColors.DistortionAmber else StadiumColors.TextSecondary,
-                        modifier = Modifier.size(14.dp),
-                    )
-                    if (!compactMode) {
-                        Text(
-                            text = if (state.stageLock) "LOCKED" else "Studio",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = if (state.stageLock) StadiumColors.DistortionAmber else StadiumColors.TextSecondary,
-                        )
-                    }
-                }
-
-                // Settings Dialog Gear
+                // Right icons inside/beside preset bar: Camera [1], Guitar Pick DI Clip, Info (i)
                 Box(
                     modifier = Modifier
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(StadiumColors.SurfaceCard)
-                        .border(1.dp, StadiumColors.BorderSubtle, RoundedCornerShape(6.dp))
-                        .clickable { showSettingsDialog = true }
-                        .padding(6.dp),
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(if (showSnapshotRibbon) Color(0xFF222226) else Color.Transparent)
+                        .clickable { showSnapshotRibbon = !showSnapshotRibbon }
+                        .padding(horizontal = 4.dp, vertical = 3.dp),
+                    contentAlignment = Alignment.Center,
                 ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Settings,
-                        contentDescription = "Audio & DSP Settings",
-                        tint = if (state.isAudioRunning) StadiumColors.DelayEmerald else StadiumColors.TextSecondary,
-                        modifier = Modifier.size(16.dp),
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        Icon(
+                            imageVector = StadiumIcons.Camera,
+                            contentDescription = "Snapshots",
+                            tint = if (state.snapshotDiscardEdits) StadiumColors.AmpRed else Color(0xFFDCDCDC),
+                            modifier = Modifier.size(16.dp),
+                        )
+                        Text(
+                            text = "${state.activeSnapshotIndex + 1}",
+                            color = if (state.snapshotDiscardEdits) StadiumColors.AmpRed else Color.White,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                    }
                 }
 
-                // Panic MUTE ALL Button (always responsive!)
-                Row(
+                // Preset Clip Audition (Guitar Pick icon matching reference!)
+                Icon(
+                    imageVector = if (state.isPresetClipPlaying) StadiumIcons.Pause else StadiumIcons.GuitarPick,
+                    contentDescription = "Preset Clip Audition",
+                    tint = if (state.isPresetClipPlaying) StadiumColors.DelayEmerald else Color(0xFF8C8C92),
                     modifier = Modifier
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(if (state.isMasterMuted) StadiumColors.AmpRed else Color(0xFF2D1212))
-                        .border(1.dp, StadiumColors.AmpRed, RoundedCornerShape(6.dp))
-                        .clickable(onClick = onToggleMasterMute)
-                        .padding(horizontal = 8.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(3.dp),
-                ) {
+                        .size(17.dp)
+                        .clickable(onClick = onTogglePresetClip),
+                )
+
+                if (!compactMode) {
+                    // Info (i) button
                     Icon(
-                        imageVector = if (state.isMasterMuted) StadiumIcons.VolumeOff else StadiumIcons.VolumeUp,
-                        contentDescription = "Master Mute All",
-                        tint = if (state.isMasterMuted) Color.White else Color(0xFFFF7A7A),
-                        modifier = Modifier.size(14.dp),
-                    )
-                    Text(
-                        text = if (state.isMasterMuted) "MUTED" else "MUTE",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = if (state.isMasterMuted) Color.White else Color(0xFFFF7A7A),
+                        imageVector = StadiumIcons.Info,
+                        contentDescription = "Preset Info & Stage Controls",
+                        tint = if (state.stageLock) StadiumColors.DistortionAmber else Color(0xFFCFD4DA),
+                        modifier = Modifier
+                            .size(17.dp)
+                            .clickable { showPresetInfoDialog = true },
                     )
                 }
             }
+
+            // Right: Dark Clock + BPM Pill (`165.0`) — Tap for Tap Tempo!
+            Row(
+                modifier = Modifier
+                    .height(32.dp)
+                    .clip(RoundedCornerShape(5.dp))
+                    .background(Color(0xFF0A0A0A))
+                    .border(1.dp, Color(0xFF252525), RoundedCornerShape(5.dp))
+                    .clickable(onClick = onTapTempo)
+                    .padding(horizontal = if (compactMode) 6.dp else 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Icon(
+                    imageVector = StadiumIcons.Clock,
+                    contentDescription = "Tap Tempo",
+                    tint = Color(0xFFD5D8DC),
+                    modifier = Modifier.size(15.dp),
+                )
+                Text(
+                    text = String.format("%.1f", state.activePreset.globalBpm),
+                    color = Color(0xFFE0E4E8),
+                    fontSize = 12.sp,
+                    fontFamily = FontFamily.Monospace,
+                )
+            }
+
+            // Compact Audio/Buffer Settings Gear (Opsi C Dialog) + Mute Panic dot
+            Box(
+                modifier = Modifier
+                    .size(28.dp)
+                    .clip(RoundedCornerShape(5.dp))
+                    .background(Color(0xFF1C1C20))
+                    .border(
+                        1.dp,
+                        if (state.isAudioRunning) StadiumColors.DelayEmerald.copy(alpha = 0.55f) else Color(0xFF2E2E34),
+                        RoundedCornerShape(5.dp),
+                    )
+                    .clickable { showSettingsDialog = true },
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Settings,
+                    contentDescription = "Audio & Buffer Settings",
+                    tint = if (state.isAudioRunning) StadiumColors.DelayEmerald else StadiumColors.TextSecondary,
+                    modifier = Modifier.size(15.dp),
+                )
+            }
+
+            // Compact Panic MUTE icon (glows bright red when muted)
+            Box(
+                modifier = Modifier
+                    .size(28.dp)
+                    .clip(RoundedCornerShape(5.dp))
+                    .background(if (state.isMasterMuted) StadiumColors.AmpRed else Color(0xFF1C1C20))
+                    .border(
+                        1.dp,
+                        if (state.isMasterMuted) Color.White else Color(0xFF3A2020),
+                        RoundedCornerShape(5.dp),
+                    )
+                    .clickable(onClick = onToggleMasterMute),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = if (state.isMasterMuted) StadiumIcons.VolumeOff else StadiumIcons.VolumeUp,
+                    contentDescription = "Master Mute All",
+                    tint = if (state.isMasterMuted) Color.White else Color(0xFFE57373),
+                    modifier = Modifier.size(14.dp),
+                )
+            }
+
+            // Far Right: Metallic Rotary Output Level Knob (drag vertically, double-tap resets 0.0 dB)
+            MetallicRotaryKnob(
+                valueDb = state.activePreset.outputLevelDb,
+                sizeDp = if (compactMode) 28.dp else 32.dp,
+                onValueChange = onOutputLevelChange,
+            )
         }
 
-        // Collapsible 8-Snapshot Quick Ribbon + Camera Mode Toggle + Clip Style Chips
+        HorizontalDivider(color = Color(0xFF222222), thickness = 1.dp)
+
+        // Collapsible 8-Snapshot Quick Ribbon + Camera Mode Toggle + Clip Style Chips (toggled by Camera [1])
         if (showSnapshotRibbon) {
-            HorizontalDivider(color = StadiumColors.BorderSubtle)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(StadiumColors.SurfaceRail)
+                    .background(Color(0xFF0E0E10))
                     .horizontalScroll(rememberScrollState())
                     .padding(horizontal = 8.dp, vertical = 5.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -395,12 +389,12 @@ fun StadiumTopInstanceBar(
                     val ledColor = Color(snap.ledColorHex)
                     Box(
                         modifier = Modifier
-                            .clip(RoundedCornerShape(5.dp))
+                            .clip(RoundedCornerShape(4.dp))
                             .background(if (isActive) StadiumColors.SurfaceSelected else StadiumColors.SurfaceCard)
                             .border(
                                 width = if (isActive) 1.5.dp else 1.dp,
                                 color = if (isActive) Color.White else ledColor.copy(alpha = 0.45f),
-                                shape = RoundedCornerShape(5.dp),
+                                shape = RoundedCornerShape(4.dp),
                             )
                             .clickable { onSelectSnapshot(snap.index) }
                             .padding(horizontal = 8.dp, vertical = 4.dp),
@@ -413,13 +407,12 @@ fun StadiumTopInstanceBar(
                     }
                 }
 
-                Spacer(Modifier.width(8.dp))
-                // White vs Red Camera Toggle
+                Spacer(Modifier.width(6.dp))
                 Row(
                     modifier = Modifier
-                        .clip(RoundedCornerShape(5.dp))
+                        .clip(RoundedCornerShape(4.dp))
                         .background(StadiumColors.SurfaceCard)
-                        .border(1.dp, if (state.snapshotDiscardEdits) StadiumColors.AmpRed else StadiumColors.BorderSubtle, RoundedCornerShape(5.dp))
+                        .border(1.dp, if (state.snapshotDiscardEdits) StadiumColors.AmpRed else StadiumColors.BorderSubtle, RoundedCornerShape(4.dp))
                         .clickable(onClick = onToggleDiscardEdits)
                         .padding(horizontal = 7.dp, vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -438,7 +431,30 @@ fun StadiumTopInstanceBar(
                     )
                 }
 
-                // Preset Clip Style Selector (Clean / Crunch / Metal / Bass)
+                // Stage Lock quick toggle inside ribbon
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(if (state.stageLock) StadiumColors.DistortionAmber.copy(alpha = 0.2f) else StadiumColors.SurfaceCard)
+                        .border(1.dp, if (state.stageLock) StadiumColors.DistortionAmber else StadiumColors.BorderSubtle, RoundedCornerShape(4.dp))
+                        .clickable(onClick = onToggleStageLock)
+                        .padding(horizontal = 7.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                ) {
+                    Icon(
+                        imageVector = if (state.stageLock) Icons.Rounded.Lock else StadiumIcons.LockOpen,
+                        contentDescription = "Stage Lock",
+                        tint = if (state.stageLock) StadiumColors.DistortionAmber else StadiumColors.TextSecondary,
+                        modifier = Modifier.size(12.dp),
+                    )
+                    Text(
+                        text = if (state.stageLock) "STAGE LOCKED" else "Studio Edit",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (state.stageLock) StadiumColors.DistortionAmber else StadiumColors.TextSecondary,
+                    )
+                }
+
                 val styles = listOf("Clean", "Crunch", "Metal", "Bass")
                 styles.forEachIndexed { idx, label ->
                     val sel = state.presetClipStyleIndex == idx
@@ -457,7 +473,51 @@ fun StadiumTopInstanceBar(
                     }
                 }
             }
+            HorizontalDivider(color = Color(0xFF222222), thickness = 1.dp)
         }
+    }
+
+    if (showPresetInfoDialog) {
+        AlertDialog(
+            onDismissRequest = { showPresetInfoDialog = false },
+            containerColor = StadiumColors.SurfaceBar,
+            title = {
+                Text("${state.activePreset.bankCode} • ${state.activePreset.name}", color = Color.White)
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = state.activePreset.presetInfo.ifBlank { "Dual-Path Stadium DSP Rig." },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = StadiumColors.TextSecondary,
+                    )
+                    Text(
+                        text = "Input Trim: ${String.format("%+.1f dB", state.activePreset.inputTrimDb)} • Output Level: ${String.format("%+.1f dB", state.activePreset.outputLevelDb)} • BPM: ${String.format("%.1f", state.activePreset.globalBpm)}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = StadiumColors.BadgeCyan,
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("Stage Lock (Protect Sliders)", color = Color.White, fontSize = 13.sp)
+                        Switch(checked = state.stageLock, onCheckedChange = { onToggleStageLock() })
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("Red Camera (Discard Edits)", color = Color.White, fontSize = 13.sp)
+                        Switch(checked = state.snapshotDiscardEdits, onCheckedChange = { onToggleDiscardEdits() })
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showPresetInfoDialog = false }) { Text("Close", color = StadiumColors.BadgeCyan) }
+            },
+        )
     }
 
     if (showSettingsDialog) {
@@ -473,63 +533,6 @@ fun StadiumTopInstanceBar(
             onLiveBufferChange = onLiveBufferChange,
             onResetBufferMin = onResetBufferMin,
             onRefreshAudioDevices = onRefreshAudioDevices,
-        )
-    }
-}
-
-@Composable
-private fun HeaderInputMiniMeter(
-    telemetryFlow: StateFlow<LiveTelemetryUi>,
-    trimDb: Float,
-) {
-    val t by telemetryFlow.collectAsStateWithLifecycle()
-    val norm = ((t.inPeakDb + 60f) / 60f).coerceIn(0f, 1f)
-    Row(
-        modifier = Modifier
-            .clip(RoundedCornerShape(6.dp))
-            .background(StadiumColors.SurfaceDeep)
-            .border(1.dp, if (t.inClipped) StadiumColors.ClipRed else StadiumColors.BorderSubtle, RoundedCornerShape(6.dp))
-            .padding(horizontal = 6.dp, vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(5.dp),
-    ) {
-        Text("IN", style = MaterialTheme.typography.labelSmall, color = StadiumColors.TextMuted)
-        Box(
-            modifier = Modifier
-                .width(7.dp)
-                .height(16.dp)
-                .clip(RoundedCornerShape(2.dp))
-                .background(StadiumColors.SurfaceSliderTrack),
-            contentAlignment = Alignment.BottomCenter,
-        ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .fillMaxHeight(norm)
-                    .background(if (t.inClipped) StadiumColors.ClipRed else StadiumColors.MeterGreen),
-            )
-        }
-        Text(
-            text = String.format("%+.1fdB", trimDb),
-            style = MaterialTheme.typography.labelSmall,
-            color = StadiumColors.TextSecondary,
-        )
-    }
-}
-
-@Composable
-private fun CompactPillToggle(label: String, active: Boolean, onClick: () -> Unit) {
-    Box(
-        modifier = Modifier
-            .clip(RoundedCornerShape(4.dp))
-            .background(if (active) StadiumColors.SurfaceSelected else Color.Transparent)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 6.dp, vertical = 2.dp),
-    ) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.labelMedium,
-            color = if (active) Color.White else StadiumColors.TextMuted,
         )
     }
 }

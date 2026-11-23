@@ -132,6 +132,104 @@ object StadiumIcons {
         }
     }
 
+    val Power: ImageVector by lazy {
+        icon("Power") {
+            path(stroke = fill, strokeLineWidth = 2.1f, strokeLineCap = StrokeCap.Round) {
+                moveTo(12f, 3.5f); lineTo(12f, 11.5f)
+                moveTo(16.6f, 6.2f)
+                arcTo(7.5f, 7.5f, 0f, true, true, 7.4f, 6.2f)
+            }
+        }
+    }
+
+    val Sliders: ImageVector by lazy {
+        icon("Sliders") {
+            path(stroke = fill, strokeLineWidth = 1.8f, strokeLineCap = StrokeCap.Round) {
+                moveTo(4f, 6.5f); lineTo(20f, 6.5f)
+                moveTo(4f, 12f); lineTo(20f, 12f)
+                moveTo(4f, 17.5f); lineTo(20f, 17.5f)
+                moveTo(9f, 4.5f); lineTo(9f, 8.5f)
+                moveTo(15f, 10f); lineTo(15f, 14f)
+                moveTo(10.5f, 15.5f); lineTo(10.5f, 19.5f)
+            }
+        }
+    }
+
+    val Clock: ImageVector by lazy {
+        icon("Clock") {
+            path(stroke = fill, strokeLineWidth = 1.9f, strokeLineCap = StrokeCap.Round, strokeLineJoin = StrokeJoin.Round) {
+                moveTo(20.5f, 12f)
+                arcTo(8.5f, 8.5f, 0f, true, true, 3.5f, 12f)
+                arcTo(8.5f, 8.5f, 0f, true, true, 20.5f, 12f)
+                moveTo(12f, 7.2f); lineTo(12f, 12.2f); lineTo(15.5f, 14.2f)
+            }
+        }
+    }
+
+    val Info: ImageVector by lazy {
+        icon("Info") {
+            path(stroke = fill, strokeLineWidth = 1.8f, strokeLineCap = StrokeCap.Round) {
+                moveTo(20.5f, 12f)
+                arcTo(8.5f, 8.5f, 0f, true, true, 3.5f, 12f)
+                arcTo(8.5f, 8.5f, 0f, true, true, 20.5f, 12f)
+                moveTo(12f, 10.8f); lineTo(12f, 16.5f)
+                moveTo(12f, 7.6f); lineTo(12f, 7.8f)
+            }
+        }
+    }
+
+    val Star: ImageVector by lazy {
+        icon("Star") {
+            path(stroke = fill, strokeLineWidth = 1.7f, strokeLineCap = StrokeCap.Round, strokeLineJoin = StrokeJoin.Round) {
+                moveTo(12f, 3.5f); lineTo(14.6f, 8.8f); lineTo(20.5f, 9.6f); lineTo(16.2f, 13.8f)
+                lineTo(17.2f, 19.6f); lineTo(12f, 16.8f); lineTo(6.8f, 19.6f); lineTo(7.8f, 13.8f)
+                lineTo(3.5f, 9.6f); lineTo(9.4f, 8.8f); close()
+            }
+        }
+    }
+
+    val CloseX: ImageVector by lazy {
+        icon("CloseX") {
+            path(stroke = fill, strokeLineWidth = 2f, strokeLineCap = StrokeCap.Round) {
+                moveTo(6f, 6f); lineTo(18f, 18f)
+                moveTo(18f, 6f); lineTo(6f, 18f)
+            }
+        }
+    }
+
+    val GridView: ImageVector by lazy {
+        icon("GridView") {
+            path(fill = fill) {
+                moveTo(4f, 4f); lineTo(10.5f, 4f); lineTo(10.5f, 10.5f); lineTo(4f, 10.5f); close()
+                moveTo(13.5f, 4f); lineTo(20f, 4f); lineTo(20f, 10.5f); lineTo(13.5f, 10.5f); close()
+                moveTo(4f, 13.5f); lineTo(10.5f, 13.5f); lineTo(10.5f, 20f); lineTo(4f, 20f); close()
+                moveTo(13.5f, 13.5f); lineTo(20f, 13.5f); lineTo(20f, 20f); lineTo(13.5f, 20f); close()
+            }
+        }
+    }
+
+    val ListView: ImageVector by lazy {
+        icon("ListView") {
+            path(stroke = fill, strokeLineWidth = 2f, strokeLineCap = StrokeCap.Round) {
+                moveTo(5f, 6.5f); lineTo(19f, 6.5f)
+                moveTo(5f, 12f); lineTo(19f, 12f)
+                moveTo(5f, 17.5f); lineTo(19f, 17.5f)
+            }
+        }
+    }
+
+    val GuitarPick: ImageVector by lazy {
+        icon("GuitarPick") {
+            path(stroke = fill, strokeLineWidth = 1.8f, strokeLineCap = StrokeCap.Round, strokeLineJoin = StrokeJoin.Round) {
+                moveTo(6.5f, 5.5f)
+                quadTo(12f, 3.2f, 17.5f, 5.5f)
+                quadTo(20f, 11.5f, 12f, 20f)
+                quadTo(4f, 11.5f, 6.5f, 5.5f)
+                close()
+            }
+        }
+    }
+
     private inline fun icon(name: String, block: ImageVector.Builder.() -> Unit): ImageVector =
         ImageVector.Builder(
             name = name,

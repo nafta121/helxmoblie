@@ -1,8 +1,13 @@
 package com.cleanroom.stadiumdsp.ui
 
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,10 +21,10 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.PlayArrow
-import com.cleanroom.stadiumdsp.ui.theme.StadiumIcons
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -35,8 +40,10 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onPlaced
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
@@ -45,8 +52,11 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.window.core.layout.WindowHeightSizeClass
 import androidx.window.core.layout.WindowWidthSizeClass
 import com.cleanroom.stadiumdsp.LiveTelemetryUi
+import com.cleanroom.stadiumdsp.RigBlockCode
 import com.cleanroom.stadiumdsp.audio.AudioDspSettings
 import com.cleanroom.stadiumdsp.audio.BufferSizeMode
+import com.cleanroom.stadiumdsp.preset.BlockCategory
+import com.cleanroom.stadiumdsp.preset.DualPathRoutingEngine
 import com.cleanroom.stadiumdsp.preset.SplitRoutingMode
 import com.cleanroom.stadiumdsp.ui.components.ModelBrowserAndInspector
 import com.cleanroom.stadiumdsp.ui.components.ModelBrowserPane
@@ -54,22 +64,23 @@ import com.cleanroom.stadiumdsp.ui.components.PolymorphicFocusView
 import com.cleanroom.stadiumdsp.ui.components.PresetBrowserScreen
 import com.cleanroom.stadiumdsp.ui.components.SignalFlowCanvas
 import com.cleanroom.stadiumdsp.ui.components.StadiumTopInstanceBar
+import com.cleanroom.stadiumdsp.ui.components.StudioDragDropHost
+import com.cleanroom.stadiumdsp.ui.components.StudioDragPayload
+import com.cleanroom.stadiumdsp.ui.components.StudioDropTarget
 import com.cleanroom.stadiumdsp.ui.live.LivePlayScreen
 import com.cleanroom.stadiumdsp.ui.live.StageTunerOverlay
+import com.cleanroom.stadiumdsp.ui.state.BrowserCategoryTab
+import com.cleanroom.stadiumdsp.ui.state.PendingInsertSlot
 import com.cleanroom.stadiumdsp.ui.state.StadiumRigViewModel
 import com.cleanroom.stadiumdsp.ui.state.StadiumUiState
 import com.cleanroom.stadiumdsp.ui.state.WorkspaceDestination
 import com.cleanroom.stadiumdsp.ui.theme.StadiumColors
+import com.cleanroom.stadiumdsp.ui.theme.StadiumIcons
 import kotlinx.coroutines.flow.StateFlow
 
 /**
- * 5-Posture Adaptive Orchestrator for Hx Mobile (Stadium DSP):
- * 1. Tablet Landscape (`EXPANDED` width): 1:1 3-panel Studio + 2x4 Live + EXP Ribbon
- * 2. Tablet Portrait (`MEDIUM` width, Mic Stand): 4-layer vertical stack (Header -> Signal Flow -> Hero Focus -> Tabs)
- * 3. Phone Landscape (`COMPACT` height): Single-row header + collapsible signal ribbon + 2-pane Focus/Sliders
- * 4. Phone Portrait (`COMPACT` width): Bottom Nav + thumb-zone single ribbon + 4x2 Live Grid
- * 5. Foldable Tabletop (`windowPosture.isTabletop`): Local hinge coordinates via `coordinates.windowToLocal`
- *    separating Top Upright Visual Display from Bottom Flat Control Deck!
+ * 5-Posture Adaptive Orchestrator for Hx Mobile (Stadium DSP) with 1:1 Helix Stadium Native Studio UI,
+ * auto-closing collapsible Model Browser, and cross-panel Dual-Path Drag & Drop.
  */
 @Composable
 fun StadiumRigScreen(
@@ -106,7 +117,7 @@ fun StadiumRigScreen(
         onRedo = viewModel::redo,
         onToggleCompareAB = viewModel::toggleCompareAB,
         onCopyAB = viewModel::copyActiveCompareSlot,
-        onSelectBlock = viewModel::selectBlock,
+        onSelectBlock = { viewModel.selectBlock(it, openBrowser = true) },
         onToggleBypass = { viewModel.toggleBlockBypass(it, fromLiveController = false) },
         onToggleStereo = viewModel::toggleBlockStereo,
         onMoveBlock = viewModel::moveBlock,
@@ -114,7 +125,7 @@ fun StadiumRigScreen(
             val next = SplitRoutingMode.entries[(state.activePreset.signalFlow.splitMode.ordinal + 1) % SplitRoutingMode.entries.size]
             viewModel.setSplitMode(next)
         },
-        onSelectAmpModel = viewModel::selectAmpModel,
+        onSelectAmpModel = { viewModel.selectAmpModel(it) },
         onSelectCabModel = viewModel::selectCabModel,
         onSelectMicModel = viewModel::selectMicModel,
         onSelectFxModel = viewModel::selectFxModel,
@@ -137,6 +148,24 @@ fun StadiumRigScreen(
         onToggleStopwatch = viewModel::toggleGigStopwatch,
         onResetStopwatch = viewModel::resetGigStopwatch,
         onUpdateTunerConfig = viewModel::setTunerConfig,
+        onInputTrimChange = viewModel::setInputTrimDb,
+        onOutputLevelChange = viewModel::setOutputLevelDb,
+        onDismissModelBrowser = viewModel::closeModelBrowser,
+        onToggleModelBrowser = viewModel::toggleModelBrowser,
+        onSelectBrowserTab = viewModel::setBrowserTab,
+        onRequestInsertAtSlot = { branch, idx ->
+            viewModel.openModelBrowser(insertSlot = PendingInsertSlot(branch, idx))
+        },
+        onInsertBlockAt = { cat, code, mid, dn, sl, br, idx, pre ->
+            viewModel.insertBlockAt(cat, code, mid, dn, sl, br, idx, isPreamp = pre)
+        },
+        onReplaceBlockAt = { bid, cat, code, mid, dn, sl, pre ->
+            viewModel.replaceBlockAt(bid, cat, code, mid, dn, sl, isPreamp = pre)
+        },
+        onMoveBlockTo = { bid, br, idx -> viewModel.moveBlockTo(bid, br, idx) },
+        onRemoveBlock = { bid -> viewModel.removeBlock(bid) },
+        onCycleSplitMode2 = viewModel::cycleSplitMode2,
+        onToggleMerge1bInto1a = viewModel::toggleMerge1bInto1a,
         onDestinationChanged = onDestinationChanged,
     )
 }
@@ -193,6 +222,18 @@ fun StadiumRigAdaptiveContent(
     onToggleStopwatch: () -> Unit,
     onResetStopwatch: () -> Unit,
     onUpdateTunerConfig: (com.cleanroom.stadiumdsp.ui.state.TunerConfigUi) -> Unit,
+    onInputTrimChange: (Float) -> Unit = {},
+    onOutputLevelChange: (Float) -> Unit = {},
+    onDismissModelBrowser: () -> Unit = {},
+    onToggleModelBrowser: () -> Unit = {},
+    onSelectBrowserTab: (BrowserCategoryTab) -> Unit = {},
+    onRequestInsertAtSlot: (String, Int) -> Unit = { _, _ -> },
+    onInsertBlockAt: (BlockCategory, Int, Int, String, String, String, Int, Boolean) -> Unit = { _, _, _, _, _, _, _, _ -> },
+    onReplaceBlockAt: (String, BlockCategory, Int, Int, String, String, Boolean) -> Unit = { _, _, _, _, _, _, _ -> },
+    onMoveBlockTo: (String, String, Int) -> Unit = { _, _, _ -> },
+    onRemoveBlock: (String) -> Unit = {},
+    onCycleSplitMode2: () -> Unit = {},
+    onToggleMerge1bInto1a: () -> Unit = {},
     onDestinationChanged: (WorkspaceDestination) -> Unit = {},
 ) {
     val adaptiveInfo = currentWindowAdaptiveInfo()
@@ -207,11 +248,65 @@ fun StadiumRigAdaptiveContent(
     val isTabletLandscape = widthClass == WindowWidthSizeClass.EXPANDED && !isPhoneLandscape
 
     var destination by rememberSaveable { mutableStateOf(WorkspaceDestination.EDIT) }
-    var isInspectorExpanded by rememberSaveable { mutableStateOf(false) }
-    var showPhoneBrowserSheet by rememberSaveable { mutableStateOf(false) }
 
     LaunchedEffect(destination) {
         onDestinationChanged(destination)
+    }
+
+    val handleDropPayload: (StudioDragPayload, StudioDropTarget) -> Unit = { payload, target ->
+        when (payload) {
+            is StudioDragPayload.MoveExistingBlock -> {
+                when (target) {
+                    is StudioDropTarget.InsertAtSlot -> onMoveBlockTo(payload.blockId, target.branch, target.indexInBranch)
+                    is StudioDropTarget.ReplaceBlock -> {
+                        val destBlk = state.activePreset.signalFlow.blocks.firstOrNull { it.id == target.blockId }
+                        if (destBlk != null) {
+                            val idxInBranch = DualPathRoutingEngine.blocksOnBranch(state.activePreset.signalFlow, destBlk.pathBranch)
+                                .indexOfFirst { it.id == destBlk.id }
+                                .coerceAtLeast(0)
+                            onMoveBlockTo(payload.blockId, destBlk.pathBranch, idxInBranch)
+                        }
+                    }
+                    StudioDropTarget.RemoveTrash -> onRemoveBlock(payload.blockId)
+                }
+            }
+            is StudioDragPayload.AddNewModel -> {
+                when (target) {
+                    is StudioDropTarget.InsertAtSlot -> onInsertBlockAt(
+                        payload.category,
+                        payload.nativeBlockCode,
+                        payload.modelId,
+                        payload.displayName,
+                        payload.shortLabel,
+                        target.branch,
+                        target.indexInBranch,
+                        payload.isPreamp,
+                    )
+                    is StudioDropTarget.ReplaceBlock -> onReplaceBlockAt(
+                        target.blockId,
+                        payload.category,
+                        payload.nativeBlockCode,
+                        payload.modelId,
+                        payload.displayName,
+                        payload.shortLabel,
+                        payload.isPreamp,
+                    )
+                    StudioDropTarget.RemoveTrash -> Unit
+                }
+            }
+        }
+    }
+
+    val handleApplyModelEntry: (BlockCategory, Int, Int, String, String, Boolean) -> Unit = { cat, code, nid, dn, sl, pre ->
+        val pending = state.pendingInsertSlot
+        val sel = state.selectedBlockOrNull
+        when {
+            pending != null -> onInsertBlockAt(cat, code, nid, dn, sl, pending.branch, pending.indexInBranch, pre)
+            sel == null -> onInsertBlockAt(cat, code, nid, dn, sl, "1A", 0, pre)
+            cat == BlockCategory.AMP && sel.nativeBlockCode == RigBlockCode.AMP && sel.instanceIndex == 0 && !pre -> onSelectAmpModel(nid)
+            cat == BlockCategory.CAB && sel.nativeBlockCode == RigBlockCode.CAB -> onSelectCabModel(nid)
+            else -> onReplaceBlockAt(sel.id, cat, code, nid, dn, sl, pre)
+        }
     }
 
     val navLayoutType = when {
@@ -220,7 +315,6 @@ fun StadiumRigAdaptiveContent(
         else -> NavigationSuiteType.NavigationRail
     }
 
-    // Edge-to-Edge compliant: NO safeDrawingPadding on NavigationSuiteScaffold parent!
     NavigationSuiteScaffold(
         layoutType = navLayoutType,
         containerColor = StadiumColors.CanvasBlack,
@@ -243,7 +337,6 @@ fun StadiumRigAdaptiveContent(
             }
         },
     ) {
-        // Apply safeDrawing + IME insets strictly inside inner screen content!
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -252,7 +345,6 @@ fun StadiumRigAdaptiveContent(
                 .imePadding(),
         ) {
             if (isTabletop) {
-                // Posture 5: Foldable Tabletop — exact local hinge bounds via coordinates.windowToLocal!
                 val hingeBounds = posture.hingeList.firstOrNull { it.isFlat || it.isSeparating }?.bounds
                 var localHingeTopPx by rememberSaveable { mutableFloatStateOf(0f) }
                 var localHingeBottomPx by rememberSaveable { mutableFloatStateOf(0f) }
@@ -268,46 +360,55 @@ fun StadiumRigAdaptiveContent(
                             }
                         },
                 ) {
-                    // Top Upright Display (above hingeTop)
                     val topMod = if (localHingeTopPx > 60f) {
                         Modifier.fillMaxWidth().height(with(density) { localHingeTopPx.toDp() })
                     } else {
                         Modifier.fillMaxWidth().weight(0.5f)
                     }
-                    Column(modifier = topMod) {
-                        StadiumTopInstanceBar(
-                            state = state, telemetryFlow = telemetryFlow, compactMode = true,
-                            onStepPreset = onStepPreset, onOpenPresets = { destination = WorkspaceDestination.PRESETS },
-                            onSelectSnapshot = onSelectSnapshot, onToggleDiscardEdits = onToggleDiscardEdits,
-                            onToggleStageLock = onToggleStageLock, onToggleMasterMute = onToggleMasterMute,
-                            onTogglePresetClip = onTogglePresetClip, onSelectPresetClipStyle = onSelectPresetClipStyle,
-                            onTapTempo = onTapTempo, onUndo = onUndo, onRedo = onRedo,
-                            onToggleCompareAB = onToggleCompareAB, onCopyAB = onCopyAB,
-                            onApplyAudioSettings = onApplyAudioSettings, onStartAudio = onStartAudio,
-                            onLiveBufferChange = onLiveBufferChange,
-                            onResetBufferMin = onResetBufferMin,
-                            onRefreshAudioDevices = onRefreshAudioDevices,
-                        )
-                        SignalFlowCanvas(
-                            flow = state.activePreset.signalFlow, selectedBlockId = state.selectedBlockId,
-                            stageLocked = state.stageLock, compactSingleRibbon = true, telemetryFlow = telemetryFlow,
-                            onSelectBlock = onSelectBlock, onToggleBypass = onToggleBypass,
-                            onOpenFocus = { onSelectBlock(it); destination = WorkspaceDestination.FOCUS },
-                            onMoveBlock = onMoveBlock, onCycleSplitMode = onCycleSplitMode,
-                        )
-                        PolymorphicFocusView(
-                            state = state, telemetryFlow = telemetryFlow, compactMode = true,
-                            onUpdateFocusXY = onUpdateFocusXY, onResetCenter = onResetCenter,
-                            onFactoryDefault = onFactoryDefault, onUserDefault = onUserDefault,
-                            onSaveUserDefault = onSaveUserDefault, onAddFavorite = onAddFavorite,
-                            onUpdateParam = onUpdateParam, onSelectMic = onSelectMicModel,
-                            onToggleAmpCabLink = onToggleAmpCabLink, onToggleCabCabLink = onToggleCabCabLink,
-                            onImportExternalAsset = onImportExternalAsset,
-                            modifier = Modifier.weight(1f),
-                        )
+                    StudioDragDropHost(modifier = topMod) {
+                        Column(modifier = Modifier.fillMaxSize()) {
+                            StadiumTopInstanceBar(
+                                state = state, telemetryFlow = telemetryFlow, compactMode = true,
+                                onStepPreset = onStepPreset, onOpenPresets = { destination = WorkspaceDestination.PRESETS },
+                                onSelectSnapshot = onSelectSnapshot, onToggleDiscardEdits = onToggleDiscardEdits,
+                                onToggleStageLock = onToggleStageLock, onToggleMasterMute = onToggleMasterMute,
+                                onTogglePresetClip = onTogglePresetClip, onSelectPresetClipStyle = onSelectPresetClipStyle,
+                                onTapTempo = onTapTempo, onUndo = onUndo, onRedo = onRedo,
+                                onToggleCompareAB = onToggleCompareAB, onCopyAB = onCopyAB,
+                                onApplyAudioSettings = onApplyAudioSettings, onStartAudio = onStartAudio,
+                                onLiveBufferChange = onLiveBufferChange, onResetBufferMin = onResetBufferMin,
+                                onRefreshAudioDevices = onRefreshAudioDevices,
+                                onInputTrimChange = onInputTrimChange, onOutputLevelChange = onOutputLevelChange,
+                                onDismissModelBrowser = onDismissModelBrowser,
+                            )
+                            SignalFlowCanvas(
+                                flow = state.activePreset.signalFlow, selectedBlockId = state.selectedBlockId,
+                                stageLocked = state.stageLock, compactSingleRibbon = true, telemetryFlow = telemetryFlow,
+                                onSelectBlock = onSelectBlock, onToggleBypass = onToggleBypass,
+                                onOpenFocus = { onSelectBlock(it); destination = WorkspaceDestination.FOCUS },
+                                onMoveBlock = onMoveBlock, onCycleSplitMode = onCycleSplitMode,
+                                inputTrimDb = state.activePreset.inputTrimDb,
+                                outputLevelDb = state.activePreset.outputLevelDb,
+                                pendingInsertSlot = state.pendingInsertSlot,
+                                onDismissModelBrowser = onDismissModelBrowser,
+                                onRequestInsertAtSlot = onRequestInsertAtSlot,
+                                onDropDragPayload = handleDropPayload,
+                                onCycleSplitMode2 = onCycleSplitMode2,
+                                onToggleMerge1bInto1a = onToggleMerge1bInto1a,
+                            )
+                            PolymorphicFocusView(
+                                state = state, telemetryFlow = telemetryFlow, compactMode = true,
+                                onUpdateFocusXY = onUpdateFocusXY, onResetCenter = onResetCenter,
+                                onFactoryDefault = onFactoryDefault, onUserDefault = onUserDefault,
+                                onSaveUserDefault = onSaveUserDefault, onAddFavorite = onAddFavorite,
+                                onUpdateParam = onUpdateParam, onSelectMic = onSelectMicModel,
+                                onToggleAmpCabLink = onToggleAmpCabLink, onToggleCabCabLink = onToggleCabCabLink,
+                                onImportExternalAsset = onImportExternalAsset,
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
                     }
 
-                    // Physical Hinge Gap Band
                     val hingeGapDp = with(density) { (localHingeBottomPx - localHingeTopPx).coerceAtLeast(10f).toDp() }
                     Box(
                         modifier = Modifier
@@ -319,7 +420,6 @@ fun StadiumRigAdaptiveContent(
                         Text("TABLETOP HINGE • BOTTOM DECK ACTIVE", style = MaterialTheme.typography.labelSmall, color = StadiumColors.PitchWahViolet)
                     }
 
-                    // Bottom Flat Control Surface (below hingeBottom)
                     LivePlayScreen(
                         state = state, isPortraitPhone = false,
                         onSelectMode = onSelectLiveMode, onTriggerPad = onTriggerPad,
@@ -332,266 +432,355 @@ fun StadiumRigAdaptiveContent(
                     )
                 }
             } else {
-                // Postures 1–4: Tablet Landscape, Tablet Portrait, Phone Landscape, Phone Portrait
-                Column(modifier = Modifier.fillMaxSize()) {
-                    StadiumTopInstanceBar(
-                        state = state,
-                        telemetryFlow = telemetryFlow,
-                        compactMode = isPhonePortrait || isPhoneLandscape,
-                        onStepPreset = onStepPreset,
-                        onOpenPresets = { destination = WorkspaceDestination.PRESETS },
-                        onSelectSnapshot = onSelectSnapshot,
-                        onToggleDiscardEdits = onToggleDiscardEdits,
-                        onToggleStageLock = onToggleStageLock,
-                        onToggleMasterMute = onToggleMasterMute,
-                        onTogglePresetClip = onTogglePresetClip,
-                        onSelectPresetClipStyle = onSelectPresetClipStyle,
-                        onTapTempo = onTapTempo,
-                        onUndo = onUndo,
-                        onRedo = onRedo,
-                        onToggleCompareAB = onToggleCompareAB,
-                        onCopyAB = onCopyAB,
-                        onApplyAudioSettings = onApplyAudioSettings,
-                        onStartAudio = onStartAudio,
-                        onLiveBufferChange = onLiveBufferChange,
-                        onResetBufferMin = onResetBufferMin,
-                        onRefreshAudioDevices = onRefreshAudioDevices,
-                    )
+                StudioDragDropHost(modifier = Modifier.fillMaxSize()) {
+                    Column(modifier = Modifier.fillMaxSize()) {
+                        StadiumTopInstanceBar(
+                            state = state,
+                            telemetryFlow = telemetryFlow,
+                            compactMode = isPhonePortrait || isPhoneLandscape,
+                            onStepPreset = onStepPreset,
+                            onOpenPresets = { destination = WorkspaceDestination.PRESETS },
+                            onSelectSnapshot = onSelectSnapshot,
+                            onToggleDiscardEdits = onToggleDiscardEdits,
+                            onToggleStageLock = onToggleStageLock,
+                            onToggleMasterMute = onToggleMasterMute,
+                            onTogglePresetClip = onTogglePresetClip,
+                            onSelectPresetClipStyle = onSelectPresetClipStyle,
+                            onTapTempo = onTapTempo,
+                            onUndo = onUndo,
+                            onRedo = onRedo,
+                            onToggleCompareAB = onToggleCompareAB,
+                            onCopyAB = onCopyAB,
+                            onApplyAudioSettings = onApplyAudioSettings,
+                            onStartAudio = onStartAudio,
+                            onLiveBufferChange = onLiveBufferChange,
+                            onResetBufferMin = onResetBufferMin,
+                            onRefreshAudioDevices = onRefreshAudioDevices,
+                            onInputTrimChange = onInputTrimChange,
+                            onOutputLevelChange = onOutputLevelChange,
+                            onDismissModelBrowser = onDismissModelBrowser,
+                        )
 
-                    when (destination) {
-                        WorkspaceDestination.TUNER -> {
-                            StageTunerOverlay(
-                                telemetryFlow = telemetryFlow,
-                                config = state.tunerConfig,
-                                onUpdateConfig = onUpdateTunerConfig,
-                                modifier = Modifier.weight(1f),
-                            )
-                        }
-
-                        WorkspaceDestination.PRESETS -> {
-                            PresetBrowserScreen(
-                                state = state,
-                                onSelectPreset = {
-                                    onSelectPreset(it)
-                                    destination = WorkspaceDestination.EDIT
-                                },
-                                onSaveUserPreset = onSaveUserPreset,
-                                modifier = Modifier.weight(1f),
-                            )
-                        }
-
-                        WorkspaceDestination.LIVE_PLAY -> {
-                            if (isTabletPortrait) {
-                                // Tablet Portrait Mic-Stand: Top Focus View + Bottom 2x4 Pedalboard
-                                PolymorphicFocusView(
-                                    state = state, telemetryFlow = telemetryFlow, compactMode = false,
-                                    onUpdateFocusXY = onUpdateFocusXY, onResetCenter = onResetCenter,
-                                    onFactoryDefault = onFactoryDefault, onUserDefault = onUserDefault,
-                                    onSaveUserDefault = onSaveUserDefault, onAddFavorite = onAddFavorite,
-                                    onUpdateParam = onUpdateParam, onSelectMic = onSelectMicModel,
-                                    onToggleAmpCabLink = onToggleAmpCabLink, onToggleCabCabLink = onToggleCabCabLink,
-                                    onImportExternalAsset = onImportExternalAsset,
-                                )
-                            } else if (!isPhoneLandscape) {
-                                SignalFlowCanvas(
-                                    flow = state.activePreset.signalFlow, selectedBlockId = state.selectedBlockId,
-                                    stageLocked = state.stageLock, compactSingleRibbon = isPhonePortrait,
-                                    telemetryFlow = telemetryFlow, onSelectBlock = onSelectBlock,
-                                    onToggleBypass = onToggleBypass,
-                                    onOpenFocus = { onSelectBlock(it); destination = WorkspaceDestination.FOCUS },
-                                    onMoveBlock = onMoveBlock, onCycleSplitMode = onCycleSplitMode,
+                        when (destination) {
+                            WorkspaceDestination.TUNER -> {
+                                StageTunerOverlay(
+                                    telemetryFlow = telemetryFlow,
+                                    config = state.tunerConfig,
+                                    onUpdateConfig = onUpdateTunerConfig,
+                                    modifier = Modifier.weight(1f),
                                 )
                             }
-                            LivePlayScreen(
-                                state = state,
-                                isPortraitPhone = isPhonePortrait,
-                                onSelectMode = onSelectLiveMode,
-                                onTriggerPad = onTriggerPad,
-                                onQuickFocusJump = {
-                                    onSelectBlock(it)
-                                    destination = WorkspaceDestination.FOCUS
-                                },
-                                onSelectExpSlot = onSelectExpSlot,
-                                onExpMoved = onExpMoved,
-                                onTapTempo = onTapTempo,
-                                onOpenTuner = { destination = WorkspaceDestination.TUNER },
-                                onToggleShowcase = onToggleShowcase,
-                                onToggleStopwatch = onToggleStopwatch,
-                                onResetStopwatch = onResetStopwatch,
-                                modifier = Modifier.weight(1f),
-                            )
-                        }
 
-                        WorkspaceDestination.FOCUS -> {
-                            SignalFlowCanvas(
-                                flow = state.activePreset.signalFlow, selectedBlockId = state.selectedBlockId,
-                                stageLocked = state.stageLock, compactSingleRibbon = isPhonePortrait || isPhoneLandscape,
-                                telemetryFlow = telemetryFlow, onSelectBlock = onSelectBlock,
-                                onToggleBypass = onToggleBypass, onOpenFocus = onSelectBlock,
-                                onMoveBlock = onMoveBlock, onCycleSplitMode = onCycleSplitMode,
-                            )
+                            WorkspaceDestination.PRESETS -> {
+                                PresetBrowserScreen(
+                                    state = state,
+                                    onSelectPreset = {
+                                        onSelectPreset(it)
+                                        destination = WorkspaceDestination.EDIT
+                                    },
+                                    onSaveUserPreset = onSaveUserPreset,
+                                    modifier = Modifier.weight(1f),
+                                )
+                            }
 
-                            if (isPhoneLandscape) {
-                                // Posture 3: Phone Landscape 2-Pane Split (Left Focus | Right Sliders)
-                                Row(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                            WorkspaceDestination.LIVE_PLAY -> {
+                                if (isTabletPortrait) {
                                     PolymorphicFocusView(
-                                        state = state, telemetryFlow = telemetryFlow, compactMode = true,
+                                        state = state, telemetryFlow = telemetryFlow, compactMode = false,
                                         onUpdateFocusXY = onUpdateFocusXY, onResetCenter = onResetCenter,
                                         onFactoryDefault = onFactoryDefault, onUserDefault = onUserDefault,
                                         onSaveUserDefault = onSaveUserDefault, onAddFavorite = onAddFavorite,
                                         onUpdateParam = onUpdateParam, onSelectMic = onSelectMicModel,
                                         onToggleAmpCabLink = onToggleAmpCabLink, onToggleCabCabLink = onToggleCabCabLink,
                                         onImportExternalAsset = onImportExternalAsset,
-                                        modifier = Modifier.weight(0.50f).fillMaxHeight(),
+                                    )
+                                } else if (!isPhoneLandscape) {
+                                    SignalFlowCanvas(
+                                        flow = state.activePreset.signalFlow, selectedBlockId = state.selectedBlockId,
+                                        stageLocked = state.stageLock, compactSingleRibbon = isPhonePortrait,
+                                        telemetryFlow = telemetryFlow, onSelectBlock = onSelectBlock,
+                                        onToggleBypass = onToggleBypass,
+                                        onOpenFocus = { onSelectBlock(it); destination = WorkspaceDestination.FOCUS },
+                                        onMoveBlock = onMoveBlock, onCycleSplitMode = onCycleSplitMode,
+                                        inputTrimDb = state.activePreset.inputTrimDb,
+                                        outputLevelDb = state.activePreset.outputLevelDb,
+                                        pendingInsertSlot = state.pendingInsertSlot,
+                                        onDismissModelBrowser = onDismissModelBrowser,
+                                        onRequestInsertAtSlot = onRequestInsertAtSlot,
+                                        onDropDragPayload = handleDropPayload,
+                                        onCycleSplitMode2 = onCycleSplitMode2,
+                                        onToggleMerge1bInto1a = onToggleMerge1bInto1a,
+                                    )
+                                }
+                                LivePlayScreen(
+                                    state = state,
+                                    isPortraitPhone = isPhonePortrait,
+                                    onSelectMode = onSelectLiveMode,
+                                    onTriggerPad = onTriggerPad,
+                                    onQuickFocusJump = {
+                                        onSelectBlock(it)
+                                        destination = WorkspaceDestination.FOCUS
+                                    },
+                                    onSelectExpSlot = onSelectExpSlot,
+                                    onExpMoved = onExpMoved,
+                                    onTapTempo = onTapTempo,
+                                    onOpenTuner = { destination = WorkspaceDestination.TUNER },
+                                    onToggleShowcase = onToggleShowcase,
+                                    onToggleStopwatch = onToggleStopwatch,
+                                    onResetStopwatch = onResetStopwatch,
+                                    modifier = Modifier.weight(1f),
+                                )
+                            }
+
+                            WorkspaceDestination.FOCUS -> {
+                                SignalFlowCanvas(
+                                    flow = state.activePreset.signalFlow, selectedBlockId = state.selectedBlockId,
+                                    stageLocked = state.stageLock, compactSingleRibbon = isPhonePortrait || isPhoneLandscape,
+                                    telemetryFlow = telemetryFlow, onSelectBlock = onSelectBlock,
+                                    onToggleBypass = onToggleBypass, onOpenFocus = onSelectBlock,
+                                    onMoveBlock = onMoveBlock, onCycleSplitMode = onCycleSplitMode,
+                                    inputTrimDb = state.activePreset.inputTrimDb,
+                                    outputLevelDb = state.activePreset.outputLevelDb,
+                                    pendingInsertSlot = state.pendingInsertSlot,
+                                    onDismissModelBrowser = onDismissModelBrowser,
+                                    onRequestInsertAtSlot = onRequestInsertAtSlot,
+                                    onDropDragPayload = handleDropPayload,
+                                    onCycleSplitMode2 = onCycleSplitMode2,
+                                    onToggleMerge1bInto1a = onToggleMerge1bInto1a,
+                                )
+
+                                if (isPhoneLandscape) {
+                                    Row(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                                        PolymorphicFocusView(
+                                            state = state, telemetryFlow = telemetryFlow, compactMode = true,
+                                            onUpdateFocusXY = onUpdateFocusXY, onResetCenter = onResetCenter,
+                                            onFactoryDefault = onFactoryDefault, onUserDefault = onUserDefault,
+                                            onSaveUserDefault = onSaveUserDefault, onAddFavorite = onAddFavorite,
+                                            onUpdateParam = onUpdateParam, onSelectMic = onSelectMicModel,
+                                            onToggleAmpCabLink = onToggleAmpCabLink, onToggleCabCabLink = onToggleCabCabLink,
+                                            onImportExternalAsset = onImportExternalAsset,
+                                            modifier = Modifier.weight(0.50f).fillMaxHeight(),
+                                        )
+                                        ModelBrowserAndInspector(
+                                            state = state, showBrowserPane = false, isInspectorExpanded = true,
+                                            onToggleInspectorExpanded = onToggleModelBrowser,
+                                            onToggleFocusView = { destination = WorkspaceDestination.EDIT },
+                                            onToggleBypass = onToggleBypass, onToggleStereo = onToggleStereo,
+                                            onSelectAmpModel = onSelectAmpModel, onSelectCabModel = onSelectCabModel,
+                                            onSelectFxModel = onSelectFxModel, onUpdateParam = onUpdateParam,
+                                            onToggleSnapshotControl = onToggleSnapshotControl, onArmMidiLearn = onArmMidiLearn,
+                                            onImportExternalAsset = onImportExternalAsset,
+                                            onSelectBrowserTab = onSelectBrowserTab,
+                                            onDismissModelBrowser = onDismissModelBrowser,
+                                            onToggleModelBrowser = onToggleModelBrowser,
+                                            onRemoveSelectedBlock = { state.selectedBlockOrNull?.let { onRemoveBlock(it.id) } },
+                                            onApplyModelEntry = handleApplyModelEntry,
+                                            onDropDragPayload = handleDropPayload,
+                                            modifier = Modifier.weight(0.50f).fillMaxHeight(),
+                                        )
+                                    }
+                                } else {
+                                    PolymorphicFocusView(
+                                        state = state, telemetryFlow = telemetryFlow, compactMode = isPhonePortrait,
+                                        onUpdateFocusXY = onUpdateFocusXY, onResetCenter = onResetCenter,
+                                        onFactoryDefault = onFactoryDefault, onUserDefault = onUserDefault,
+                                        onSaveUserDefault = onSaveUserDefault, onAddFavorite = onAddFavorite,
+                                        onUpdateParam = onUpdateParam, onSelectMic = onSelectMicModel,
+                                        onToggleAmpCabLink = onToggleAmpCabLink, onToggleCabCabLink = onToggleCabCabLink,
+                                        onImportExternalAsset = onImportExternalAsset,
                                     )
                                     ModelBrowserAndInspector(
-                                        state = state, showBrowserPane = false, isInspectorExpanded = true,
-                                        onToggleInspectorExpanded = { isInspectorExpanded = !isInspectorExpanded },
+                                        state = state,
+                                        showBrowserPane = isTabletLandscape,
+                                        isInspectorExpanded = false,
+                                        onToggleInspectorExpanded = onToggleModelBrowser,
                                         onToggleFocusView = { destination = WorkspaceDestination.EDIT },
                                         onToggleBypass = onToggleBypass, onToggleStereo = onToggleStereo,
                                         onSelectAmpModel = onSelectAmpModel, onSelectCabModel = onSelectCabModel,
                                         onSelectFxModel = onSelectFxModel, onUpdateParam = onUpdateParam,
                                         onToggleSnapshotControl = onToggleSnapshotControl, onArmMidiLearn = onArmMidiLearn,
                                         onImportExternalAsset = onImportExternalAsset,
-                                        modifier = Modifier.weight(0.50f).fillMaxHeight(),
+                                        onSelectBrowserTab = onSelectBrowserTab,
+                                        onDismissModelBrowser = onDismissModelBrowser,
+                                        onToggleModelBrowser = onToggleModelBrowser,
+                                        onRemoveSelectedBlock = { state.selectedBlockOrNull?.let { onRemoveBlock(it.id) } },
+                                        onApplyModelEntry = handleApplyModelEntry,
+                                        onDropDragPayload = handleDropPayload,
+                                        modifier = Modifier.weight(1f),
                                     )
                                 }
-                            } else {
-                                PolymorphicFocusView(
-                                    state = state, telemetryFlow = telemetryFlow, compactMode = isPhonePortrait,
-                                    onUpdateFocusXY = onUpdateFocusXY, onResetCenter = onResetCenter,
-                                    onFactoryDefault = onFactoryDefault, onUserDefault = onUserDefault,
-                                    onSaveUserDefault = onSaveUserDefault, onAddFavorite = onAddFavorite,
-                                    onUpdateParam = onUpdateParam, onSelectMic = onSelectMicModel,
-                                    onToggleAmpCabLink = onToggleAmpCabLink, onToggleCabCabLink = onToggleCabCabLink,
-                                    onImportExternalAsset = onImportExternalAsset,
-                                )
-                                ModelBrowserAndInspector(
-                                    state = state,
-                                    showBrowserPane = isTabletLandscape,
-                                    isInspectorExpanded = isInspectorExpanded,
-                                    onToggleInspectorExpanded = { isInspectorExpanded = !isInspectorExpanded },
-                                    onToggleFocusView = { destination = WorkspaceDestination.EDIT },
-                                    onToggleBypass = onToggleBypass, onToggleStereo = onToggleStereo,
-                                    onSelectAmpModel = onSelectAmpModel, onSelectCabModel = onSelectCabModel,
-                                    onSelectFxModel = onSelectFxModel, onUpdateParam = onUpdateParam,
-                                    onToggleSnapshotControl = onToggleSnapshotControl, onArmMidiLearn = onArmMidiLearn,
-                                    onImportExternalAsset = onImportExternalAsset,
-                                    modifier = Modifier.weight(1f),
-                                )
-                            }
-                        }
-
-                        WorkspaceDestination.EDIT -> {
-                            SignalFlowCanvas(
-                                flow = state.activePreset.signalFlow, selectedBlockId = state.selectedBlockId,
-                                stageLocked = state.stageLock, compactSingleRibbon = isPhonePortrait || isPhoneLandscape,
-                                telemetryFlow = telemetryFlow, onSelectBlock = onSelectBlock,
-                                onToggleBypass = onToggleBypass,
-                                onOpenFocus = { onSelectBlock(it); destination = WorkspaceDestination.FOCUS },
-                                onMoveBlock = onMoveBlock, onCycleSplitMode = onCycleSplitMode,
-                            )
-
-                            if (isTabletPortrait) {
-                                // Posture 2: Tablet Portrait Mic-Stand 4-layer stack (includes Hero Focus View!)
-                                PolymorphicFocusView(
-                                    state = state, telemetryFlow = telemetryFlow, compactMode = false,
-                                    onUpdateFocusXY = onUpdateFocusXY, onResetCenter = onResetCenter,
-                                    onFactoryDefault = onFactoryDefault, onUserDefault = onUserDefault,
-                                    onSaveUserDefault = onSaveUserDefault, onAddFavorite = onAddFavorite,
-                                    onUpdateParam = onUpdateParam, onSelectMic = onSelectMicModel,
-                                    onToggleAmpCabLink = onToggleAmpCabLink, onToggleCabCabLink = onToggleCabCabLink,
-                                    onImportExternalAsset = onImportExternalAsset,
-                                )
                             }
 
-                            if (isPhonePortrait) {
-                                // Phone Portrait toggle between Thumb-Zone Sliders and Model Browser
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .background(StadiumColors.SurfaceRail)
-                                        .padding(horizontal = 8.dp, vertical = 4.dp),
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                ) {
-                                    PhonePaneTab("Parameters", !showPhoneBrowserSheet, { showPhoneBrowserSheet = false }, Modifier.weight(1f))
-                                    PhonePaneTab("Models / SAF", showPhoneBrowserSheet, { showPhoneBrowserSheet = true }, Modifier.weight(1f))
-                                }
-                                if (showPhoneBrowserSheet) {
-                                    ModelBrowserPane(
-                                        state = state,
-                                        onSelectAmpModel = { onSelectAmpModel(it); showPhoneBrowserSheet = false },
-                                        onSelectCabModel = { onSelectCabModel(it); showPhoneBrowserSheet = false },
-                                        onSelectFxModel = { bid, nid, dn, sl -> onSelectFxModel(bid, nid, dn, sl); showPhoneBrowserSheet = false },
+                            WorkspaceDestination.EDIT -> {
+                                SignalFlowCanvas(
+                                    flow = state.activePreset.signalFlow, selectedBlockId = state.selectedBlockId,
+                                    stageLocked = state.stageLock, compactSingleRibbon = isPhoneLandscape,
+                                    telemetryFlow = telemetryFlow, onSelectBlock = onSelectBlock,
+                                    onToggleBypass = onToggleBypass,
+                                    onOpenFocus = { onSelectBlock(it); destination = WorkspaceDestination.FOCUS },
+                                    onMoveBlock = onMoveBlock, onCycleSplitMode = onCycleSplitMode,
+                                    inputTrimDb = state.activePreset.inputTrimDb,
+                                    outputLevelDb = state.activePreset.outputLevelDb,
+                                    pendingInsertSlot = state.pendingInsertSlot,
+                                    onDismissModelBrowser = onDismissModelBrowser,
+                                    onRequestInsertAtSlot = onRequestInsertAtSlot,
+                                    onDropDragPayload = handleDropPayload,
+                                    onCycleSplitMode2 = onCycleSplitMode2,
+                                    onToggleMerge1bInto1a = onToggleMerge1bInto1a,
+                                )
+
+                                if (isTabletPortrait) {
+                                    PolymorphicFocusView(
+                                        state = state, telemetryFlow = telemetryFlow, compactMode = false,
+                                        onUpdateFocusXY = onUpdateFocusXY, onResetCenter = onResetCenter,
+                                        onFactoryDefault = onFactoryDefault, onUserDefault = onUserDefault,
+                                        onSaveUserDefault = onSaveUserDefault, onAddFavorite = onAddFavorite,
+                                        onUpdateParam = onUpdateParam, onSelectMic = onSelectMicModel,
+                                        onToggleAmpCabLink = onToggleAmpCabLink, onToggleCabCabLink = onToggleCabCabLink,
                                         onImportExternalAsset = onImportExternalAsset,
-                                        modifier = Modifier.weight(1f).fillMaxWidth(),
                                     )
+                                }
+
+                                if (isPhonePortrait) {
+                                    // Phone Portrait: Full-width Inspector + auto-closing bottom Model Browser overlay sheet
+                                    Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                                        ModelBrowserAndInspector(
+                                            state = state,
+                                            showBrowserPane = false,
+                                            isInspectorExpanded = true,
+                                            onToggleInspectorExpanded = onToggleModelBrowser,
+                                            onToggleFocusView = { destination = WorkspaceDestination.FOCUS },
+                                            onToggleBypass = onToggleBypass, onToggleStereo = onToggleStereo,
+                                            onSelectAmpModel = onSelectAmpModel, onSelectCabModel = onSelectCabModel,
+                                            onSelectFxModel = onSelectFxModel, onUpdateParam = onUpdateParam,
+                                            onToggleSnapshotControl = onToggleSnapshotControl, onArmMidiLearn = onArmMidiLearn,
+                                            onImportExternalAsset = onImportExternalAsset,
+                                            onSelectBrowserTab = onSelectBrowserTab,
+                                            onDismissModelBrowser = onDismissModelBrowser,
+                                            onToggleModelBrowser = onToggleModelBrowser,
+                                            onRemoveSelectedBlock = { state.selectedBlockOrNull?.let { onRemoveBlock(it.id) } },
+                                            onApplyModelEntry = handleApplyModelEntry,
+                                            onDropDragPayload = handleDropPayload,
+                                            modifier = Modifier.fillMaxSize(),
+                                        )
+
+                                        // Auto-closing bottom overlay Model Browser on Phone Portrait
+                                        androidx.compose.animation.AnimatedVisibility(
+                                            visible = state.isModelBrowserOpen,
+                                            enter = slideInVertically(initialOffsetY = { it / 2 }) + fadeIn(),
+                                            exit = slideOutVertically(targetOffsetY = { it / 2 }) + fadeOut(),
+                                            modifier = Modifier.fillMaxSize(),
+                                        ) {
+                                            Box(modifier = Modifier.fillMaxSize()) {
+                                                // Top dim scrim auto-closes Model Browser when tapped
+                                                Box(
+                                                    modifier = Modifier
+                                                        .fillMaxSize()
+                                                        .background(Color.Black.copy(alpha = 0.45f))
+                                                        .pointerInput(Unit) {
+                                                            detectTapGestures(onTap = { onDismissModelBrowser() })
+                                                        },
+                                                )
+                                                Column(
+                                                    modifier = Modifier
+                                                        .align(Alignment.BottomCenter)
+                                                        .fillMaxWidth()
+                                                        .fillMaxHeight(0.84f)
+                                                        .clip(RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp))
+                                                        .background(Color(0xFF0E0E11))
+                                                        .border(1.dp, Color(0xFF2B2B32), RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp)),
+                                                ) {
+                                                    Row(
+                                                        modifier = Modifier
+                                                            .fillMaxWidth()
+                                                            .background(Color(0xFF141418))
+                                                            .padding(horizontal = 10.dp, vertical = 5.dp),
+                                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                                        verticalAlignment = Alignment.CenterVertically,
+                                                    ) {
+                                                        Text(
+                                                            text = state.pendingInsertSlot?.let { "Add Block to Path ${it.branch}" } ?: "Select Amp / Effect Model",
+                                                            color = Color.White,
+                                                            fontSize = 11.sp,
+                                                        )
+                                                        Text(
+                                                            text = "Close ✕",
+                                                            color = StadiumColors.BadgeCyan,
+                                                            fontSize = 11.sp,
+                                                            modifier = Modifier
+                                                                .clickable(onClick = onDismissModelBrowser)
+                                                                .padding(horizontal = 6.dp, vertical = 2.dp),
+                                                        )
+                                                    }
+                                                    ModelBrowserPane(
+                                                        state = state,
+                                                        onSelectBrowserTab = onSelectBrowserTab,
+                                                        onRemoveSelectedBlock = {
+                                                            state.selectedBlockOrNull?.let { onRemoveBlock(it.id) }
+                                                            onDismissModelBrowser()
+                                                        },
+                                                        onApplyModelEntry = { cat, code, nid, dn, sl, pre ->
+                                                            handleApplyModelEntry(cat, code, nid, dn, sl, pre)
+                                                            onDismissModelBrowser()
+                                                        },
+                                                        onImportExternalAsset = onImportExternalAsset,
+                                                        onDropDragPayload = handleDropPayload,
+                                                        modifier = Modifier.weight(1f).fillMaxWidth(),
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
                                 } else {
+                                    // Tablet Landscape / Tablet Portrait / Phone Landscape: 1:1 Helix Stadium Native split!
+                                    // Clicking empty canvas / non-block area smoothly collapses left browser & expands Inspector to 100%!
                                     ModelBrowserAndInspector(
-                                        state = state, showBrowserPane = false, isInspectorExpanded = true,
-                                        onToggleInspectorExpanded = { isInspectorExpanded = !isInspectorExpanded },
+                                        state = state,
+                                        showBrowserPane = true,
+                                        isInspectorExpanded = false,
+                                        onToggleInspectorExpanded = onToggleModelBrowser,
                                         onToggleFocusView = { destination = WorkspaceDestination.FOCUS },
                                         onToggleBypass = onToggleBypass, onToggleStereo = onToggleStereo,
                                         onSelectAmpModel = onSelectAmpModel, onSelectCabModel = onSelectCabModel,
                                         onSelectFxModel = onSelectFxModel, onUpdateParam = onUpdateParam,
                                         onToggleSnapshotControl = onToggleSnapshotControl, onArmMidiLearn = onArmMidiLearn,
                                         onImportExternalAsset = onImportExternalAsset,
+                                        onSelectBrowserTab = onSelectBrowserTab,
+                                        onDismissModelBrowser = onDismissModelBrowser,
+                                        onToggleModelBrowser = onToggleModelBrowser,
+                                        onRemoveSelectedBlock = { state.selectedBlockOrNull?.let { onRemoveBlock(it.id) } },
+                                        onApplyModelEntry = handleApplyModelEntry,
+                                        onDropDragPayload = handleDropPayload,
                                         modifier = Modifier.weight(1f),
                                     )
                                 }
-                            } else {
-                                // Tablet Landscape / Tablet Portrait / Phone Landscape simultaneous Browser + Inspector
-                                ModelBrowserAndInspector(
-                                    state = state,
-                                    showBrowserPane = true,
-                                    isInspectorExpanded = isInspectorExpanded,
-                                    onToggleInspectorExpanded = { isInspectorExpanded = !isInspectorExpanded },
-                                    onToggleFocusView = { destination = WorkspaceDestination.FOCUS },
-                                    onToggleBypass = onToggleBypass, onToggleStereo = onToggleStereo,
-                                    onSelectAmpModel = onSelectAmpModel, onSelectCabModel = onSelectCabModel,
-                                    onSelectFxModel = onSelectFxModel, onUpdateParam = onUpdateParam,
-                                    onToggleSnapshotControl = onToggleSnapshotControl, onArmMidiLearn = onArmMidiLearn,
-                                    onImportExternalAsset = onImportExternalAsset,
-                                    modifier = Modifier.weight(1f),
-                                )
                             }
                         }
-                    }
 
-                    // Bottom Contextual Status Bar (Helix Stadium Native #2A2A2A style)
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(Color(0xFF242424))
-                            .padding(horizontal = 10.dp, vertical = 3.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(
-                            text = state.statusBanner,
-                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
-                            color = StadiumColors.TextSecondary,
-                            maxLines = 1,
-                        )
-                        StatusBarCpuBadge(telemetryFlow = telemetryFlow)
+                        // Bottom Contextual Status Bar (Helix Stadium Native subtle #18181A footer)
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(Color(0xFF18181A))
+                                .pointerInput(Unit) {
+                                    detectTapGestures(onTap = { onDismissModelBrowser() })
+                                }
+                                .padding(horizontal = 10.dp, vertical = 3.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                text = state.statusBanner,
+                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                                color = StadiumColors.TextSecondary,
+                                maxLines = 1,
+                            )
+                            StatusBarCpuBadge(telemetryFlow = telemetryFlow)
+                        }
                     }
                 }
             }
         }
-    }
-}
-
-@Composable
-private fun PhonePaneTab(label: String, selected: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
-    Box(
-        modifier = modifier
-            .background(if (selected) StadiumColors.SurfaceSelected else StadiumColors.SurfaceCard)
-            .border(1.dp, if (selected) StadiumColors.AmpRed else StadiumColors.BorderSubtle)
-            .clickable(onClick = onClick)
-            .padding(vertical = 6.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(label, style = MaterialTheme.typography.labelSmall, color = if (selected) Color.White else StadiumColors.TextSecondary)
     }
 }
 
